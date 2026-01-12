@@ -1,0 +1,26 @@
+---
+
+# 📘 **INSTALLATION & TROUBLESHOOTING GUIDE**
+
+## 📦 **Installation Instructions**
+
+### **Step 1: Install pyRevit**
+1. Download pyRevit from: https://github.com/eirannejad/pyRevit/releases
+2. Run the installer and follow prompts
+3. Restart Revit after installation
+
+### **Step 2: Create Folder Structure**
+```
+C:\Users\<YourUsername>\AppData\Roaming\pyRevit\Extensions\
+└── YourExtension.extension\
+    └── YourTab.tab\
+        └── YourPanel.panel\
+            └── YOLO Matcher.pushbutton\
+                ├── script.py
+                └── detector\
+                    ├── __init__.py (empty file)
+                    ├── config.py
+                    ├── core.py
+                    ├── classification.py
+                    ├── export.py
+                    └── visualization.py

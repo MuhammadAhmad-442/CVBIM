@@ -21,7 +21,32 @@ from config import REVIT_FT_TO_MM, SIDES, Log
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1: ELEMENT COLLECTION
 # ═══════════════════════════════════════════════════════════════════════════
-
+def get_element_id(element_or_id):
+    """
+    Safely get integer ID from Element or ElementId.
+    Handles different Revit API versions.
+    
+    Args:
+        element_or_id: Revit Element or ElementId
+    
+    Returns:
+        int: Element ID as integer
+    """
+    if isinstance(element_or_id, int):
+        return element_or_id
+    
+    # If it's an Element, get its Id first
+    if hasattr(element_or_id, 'Id'):
+        elem_id = element_or_id.Id
+    else:
+        elem_id = element_or_id
+    
+    # Now convert ElementId to int
+    if hasattr(elem_id, 'IntegerValue'):
+        return elem_id.IntegerValue
+    else:
+        return int(elem_id)
+        
 def _safe_name(elem):
     """Extract family, type, and element names safely."""
     try:
@@ -41,34 +66,78 @@ def _safe_name(elem):
 
 def collect_elements(doc, view):
     """
-    Collect all facade elements from Revit model.
-    
-    Returns:
-        dict: {
-            "door": [elements],
-            "windows": [elements],
-            "panels": [elements]
-        }
+    Collect elements - ULTRA SAFE VERSION (no LINQ, no filters).
     """
     door = []
     windows = []
     panels = []
+    PANEL_KEYS  = ["panel", "wp", "wallpanel", "wall_panel"]
+    DOOR_KEYS   = ["door", "opening", "frame", "jamb"]
+    WINDOW_KEYS = ["window", "glazing", "vision"]
+
     
-    instances = FilteredElementCollector(doc, view.Id).OfClass(FamilyInstance)
-    
-    for e in instances:
-        fam, typ, name = _safe_name(e)
-        combo = fam + " " + typ + " " + name
+    try:
+        Log.info("Starting ULTRA-SAFE element collection...")
         
-        if " door" in combo:
-            door.append(e)
-        elif "window" in combo:
-            windows.append(e)
-        elif "panel" in combo or "wall panel" in combo:
-            panels.append(e)
-    
-    Log.info("Collected: Doors=%d, Windows=%d, Panels=%d", 
-             len(door), len(windows), len(panels))
+        # Get all elements of Category OST_GenericModel or try multiple categories
+        from Autodesk.Revit.DB import BuiltInCategory
+        
+        categories_to_try = [
+            BuiltInCategory.OST_GenericModel,
+            BuiltInCategory.OST_Doors,
+            BuiltInCategory.OST_Windows,
+            BuiltInCategory.OST_Walls,
+        ]
+        
+        all_elements = []
+        
+        for cat in categories_to_try:
+            try:
+                Log.info("Trying category: %s", cat)
+                collector = FilteredElementCollector(doc).OfCategory(cat).WhereElementIsNotElementType()
+                elements = list(collector)
+                Log.info("  Found %d elements in this category", len(elements))
+                all_elements.extend(elements)
+            except Exception as e:
+                Log.warn("  Category failed: %s", str(e))
+                continue
+        
+        Log.info("Total elements to process: %d", len(all_elements))
+        
+        # Process collected elements
+        for idx, e in enumerate(all_elements):
+            if idx % 500 == 0:
+                Log.info("Processing element %d/%d", idx, len(all_elements))
+            
+            try:
+                # Check if it's a family instance
+                def has_any(text, keys):
+                    return any(k in text for k in keys)
+
+                fam, typ, name = _safe_name(e)
+                combo = (fam + " " + typ + " " + name).lower()
+
+                if has_any(combo, DOOR_KEYS) and isinstance(e, FamilyInstance):
+                    door.append(e)
+
+                elif has_any(combo, WINDOW_KEYS) and isinstance(e, FamilyInstance):
+                    windows.append(e)
+
+                elif has_any(combo, PANEL_KEYS):
+                    panels.append(e)
+
+
+                    
+            except:
+                continue
+        
+        Log.info("Collection complete: Doors=%d, Windows=%d, Panels=%d", 
+                 len(door), len(windows), len(panels))
+        
+    except Exception as e:
+        Log.error("FATAL: Collection failed: %s", str(e))
+        import traceback
+        traceback.print_exc()
     
     return {
         "door": door,
@@ -139,17 +208,34 @@ def compute_bounds(panel_elems, view):
 # SECTION 3: CACHING UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ===========================================================================
+# SECTION 3: CACHING UTILITIES
+# ===========================================================================
+
 def build_element_cache(doc, view):
     """
-    Build lookup cache for fast element access.
+    Build lookup cache for fast element access (with limits).
     
     Returns:
         dict: {element_id: element}
     """
     cache = {}
     collector = FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType()
+    
+    count = 0
+    max_elements = 10000  # Safety limit
+    
     for e in collector:
-        cache[e.Id.IntegerValue] = e
+        if count >= max_elements:
+            Log.warn("Element cache limit reached (%d elements)", max_elements)
+            break
+        
+        try:
+            elem_id = get_element_id(e)
+            cache[elem_id] = e
+            count += 1
+        except:
+            continue
     
     Log.debug("Cached %d elements", len(cache))
     return cache

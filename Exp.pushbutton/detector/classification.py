@@ -19,6 +19,7 @@ SECTIONS:
 """
 from config import STUD_HEIGHT_THRESHOLD_MM, SIDE_WEIGHTS, INTERIOR_THRESHOLD, Log, SIDES
 from core import dims, center_xy, center_z, compute_bounds, init_side_summary
+from core import dims, center_xy, center_z, compute_bounds, init_side_summary, get_element_id
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1: FLOOR CLASSIFICATION
@@ -211,9 +212,6 @@ def group_door_studs(studs):
 def build_door_groups(pairs):
     """
     Create door group metadata from stud pairs.
-    
-    Returns:
-        list: [{"id": 1, "center": (x,y), ...}, ...]
     """
     groups = []
     
@@ -223,8 +221,8 @@ def build_door_groups(pairs):
         
         groups.append({
             "id": idx,
-            "stud_left": eL.Id.IntegerValue,
-            "stud_right": eR.Id.IntegerValue,
+            "stud_left": get_element_id(eL),  # FIXED
+            "stud_right": get_element_id(eR),  # FIXED
             "center": ((cxL + cxR) / 2.0, (cyL + cyR) / 2.0),
             "dims_left": dL,
             "dims_right": dR
@@ -276,9 +274,9 @@ def match_headers(pairs, headers):
         
         door_output.append({
             "door": idx,
-            "stud_left": eL.Id.IntegerValue,
-            "stud_right": eR.Id.IntegerValue,
-            "header": eH.Id.IntegerValue,
+            "stud_left": get_element_id(eL),  # FIXED
+            "stud_right": get_element_id(eR),  # FIXED
+            "header": get_element_id(eH),  # FIXED
             "width_mm": width,
             "height_mm": height,
             "dims_left": dL,

@@ -1,222 +1,363 @@
 # -*- coding: utf-8 -*-
-__title__ = "Exp side loc mark [OPTIMIZED]"
+"""
+FILE: script.py
+PURPOSE: YOLO-BIM detection pipeline with crash protection
+"""
+__title__ = "YOLO-BIM Matcher"
 __author__ = "Script"
-__doc__ = "Detect doors, classify sides + floors, export BIM, match YOLO, highlight."
+__doc__ = "Match YOLO detections to BIM elements"
+
+import sys
+import os
+
+# Add script directory to path
+script_dir = os.path.dirname(__file__)
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
 
 from pyrevit import revit, forms
-from Autodesk.Revit.DB import FilteredElementCollector, ElementId
+import traceback
 
-# Import refactored modules
-from logger import Logger
-from config import FACADE_SIDES
-from detector.collectors import collect_bim_openings
-from detector.grouping import (
-    split_studs_headers,
-    group_studs_into_rows_and_pairs,
-    build_door_groups,
-    match_headers_for_door
-)
-from detector.panels import (
-    compute_global_bounds,
-    classify_all_panels,
-    classify_door_side,
-    init_side_summary
-)
-from detector.sides import classify_side
-from detector.geometry import dims, build_bbox_cache
-from detector.highlight import (
-    highlight_panels_by_floor,
-    highlight_panels_by_side,
-    highlight_door
-)
-from detector.json_io import (
-    load_yolo_detections,
-    load_bim_export,
-    save_side_summary,
-    save_door_output,
-    save_yolo_bim_matches,
-    save_side_sequences
-)
-from detector.bim_export import export_bim_geometry
-from detector.matching import match_all_yolo_to_bim
+# ===========================================================================
+# CRASH-SAFE MAIN FUNCTION
+# ===========================================================================
 
-# ============================================================
-# MAIN PIPELINE
-# ============================================================
-
-doc = revit.doc
-view = doc.ActiveView
-
-Logger.section("PIPELINE START")
-
-# ---------------------------------------------------------
-# STEP 1 — COLLECT MODEL ELEMENTS
-# ---------------------------------------------------------
-Logger.subsection("Step 1: Collecting BIM Elements")
-
-bim = collect_bim_openings(doc, view)
-door_elems = bim["door"]
-window_elems = bim["windows"]
-panel_elems = bim["panels"]
-
-if not panel_elems:
-    forms.alert("No wall panels found. Stopping.", exitscript=True)
-
-Logger.info("Collected: Doors=%d, Windows=%d, Panels=%d",
-           len(door_elems), len(window_elems), len(panel_elems))
-
-# ---------------------------------------------------------
-# OPTIMIZATION: Build element caches
-# ---------------------------------------------------------
-Logger.subsection("Building Element Caches")
-
-all_elements = list(door_elems) + list(window_elems) + list(panel_elems)
-bbox_cache = build_bbox_cache(all_elements, view)
-
-# Build element lookup
-element_cache = {}
-for e in FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType():
-    element_cache[e.Id.IntegerValue] = e
-
-Logger.info("Cached %d element bounding boxes", len(bbox_cache))
-Logger.info("Cached %d element references", len(element_cache))
-
-# ---------------------------------------------------------
-# STEP 2 — STUD / HEADER SPLITTING
-# ---------------------------------------------------------
-Logger.subsection("Step 2: Processing Door Components")
-
-studs, headers = split_studs_headers(door_elems, view)
-rowA, rowB, pairs = group_studs_into_rows_and_pairs(studs)
-
-Logger.info("Found %d stud pairs for doors", len(pairs))
-
-# ---------------------------------------------------------
-# STEP 3 — BUILD DOOR GROUPS
-# ---------------------------------------------------------
-Logger.subsection("Step 3: Building Door Groups")
-
-door_groups = build_door_groups(pairs, view)
-Logger.info("Created %d logical door groups", len(door_groups))
-
-# ---------------------------------------------------------
-# STEP 4 — PANEL CLASSIFICATION (SIDE + FLOOR)
-# ---------------------------------------------------------
-Logger.subsection("Step 4: Classifying Panels")
-
-bounds = compute_global_bounds(panel_elems, view)
-side_summary = classify_all_panels(panel_elems, view)
-
-# ---------------------------------------------------------
-# STEP 5 — ASSIGN WINDOWS TO SIDES
-# ---------------------------------------------------------
-Logger.subsection("Step 5: Assigning Windows to Sides")
-
-for e in window_elems:
-    d = dims(e, view)
-    if not d:
-        continue
+def main():
+    """Main pipeline with error handling."""
     
-    cx = (d[3] + d[4]) / 2.0
-    cy = (d[5] + d[6]) / 2.0
+    try:
+        # Import modules
+        from detector.config import Log, SIDES
+        from detector.core import collect_elements, build_element_cache, dims, center_xy, get_element_id
+        from detector.classification import (
+            classify_all_panels,
+            split_studs_headers,
+            group_door_studs,
+            build_door_groups,
+            match_headers,
+            classify_yolo_side
+        )
+        from detector.export import (
+            export_bim_geometry,
+            match_yolo_to_bim,
+            load_yolo,
+            save_side_summary,
+            save_door_output,
+            save_yolo_matches,
+            save_sequences
+        )
+        from detector.visualization import (
+            highlight_panels_by_side,
+            highlight_panels_by_floor,
+            highlight_doors
+        )
+        
+        Log.info("All modules loaded successfully")
+        
+    except Exception as e:
+        print("\n" + "=" * 70)
+        print("FATAL ERROR: Cannot load modules")
+        print("=" * 70)
+        print(str(e))
+        traceback.print_exc()
+        forms.alert("Module import failed. Check console.", exitscript=True)
+        return
     
-    xmin_b, xmax_b, ymin_b, ymax_b = bounds
+    # Get document and view
+    doc = revit.doc
+    view = doc.ActiveView
     
-    dA = abs(cx - xmin_b)
-    dC = abs(cx - xmax_b)
-    dB = abs(cy - ymin_b)
-    dD = abs(cy - ymax_b)
+    if not view:
+        forms.alert("No active view. Please open a 3D view.", exitscript=True)
+        return
     
-    m = min(dA, dB, dC, dD)
-    if m == dA:
-        side = "A"
-    elif m == dC:
-        side = "C"
-    elif m == dB:
-        side = "B"
-    else:
-        side = "D"
+    Log.section("YOLO-BIM PIPELINE START")
     
-    side_summary[side]["windows"].append(e.Id.IntegerValue)
+    # -----------------------------------------------------------------------
+    # STEP 1: COLLECT ELEMENTS
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 1: COLLECTING BIM ELEMENTS")
+        bim = collect_elements(doc, view)
+        door_elems = bim["door"]
+        window_elems = bim["windows"]
+        panel_elems = bim["panels"]
+        
+        if not panel_elems:
+            forms.alert("No wall panels found. Cannot proceed.", exitscript=True)
+            return
+        
+        Log.info("Collection complete")
+        
+    except Exception as e:
+        Log.error("Step 1 failed: %s", str(e))
+        traceback.print_exc()
+        forms.alert("Failed to collect elements. See console.", exitscript=True)
+        return
+    
+    # -----------------------------------------------------------------------
+    # STEP 2: BUILD CACHES (OPTIONAL - SKIP IF CAUSING CRASH)
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 2: BUILDING ELEMENT CACHES")
+        element_cache = build_element_cache(doc, view)
+        Log.info("Cache built successfully")
+    except Exception as e:
+        Log.warn("Caching failed (non-critical): %s", str(e))
+        element_cache = {}
+    
+    # -----------------------------------------------------------------------
+    # STEP 3: CLASSIFY PANELS
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 3: CLASSIFYING PANELS")
+        side_summary, bounds, floor_split = classify_all_panels(panel_elems, view)
+        Log.info("Building bounds: xmin=%.2f, xmax=%.2f, ymin=%.2f, ymax=%.2f", *bounds)
+        Log.info("Floor split Z: %.2f mm", floor_split)
+        
+    except Exception as e:
+        Log.error("Step 3 failed: %s", str(e))
+        traceback.print_exc()
+        forms.alert("Panel classification failed. See console.", exitscript=True)
+        return
+    
+    # -----------------------------------------------------------------------
+    # STEP 4: ASSIGN WINDOWS
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 4: ASSIGNING WINDOWS")
+        
+        for e in window_elems:
+            d = dims(e, view)
+            if not d:
+                continue
+            
+            cx, cy = center_xy(d)
+            xmin_b, xmax_b, ymin_b, ymax_b = bounds
+            
+            distances = {
+                "A": abs(cx - xmin_b),
+                "C": abs(cx - xmax_b),
+                "B": abs(cy - ymin_b),
+                "D": abs(cy - ymax_b)
+            }
+            side = min(distances, key=distances.get)
+            
+            side_summary[side]["windows"].append(get_element_id(e))
+        
+        window_count = sum(len(side_summary[s]["windows"]) for s in SIDES)
+        Log.info("Assigned %d windows", window_count)
+        
+    except Exception as e:
+        Log.error("Step 4 failed: %s", str(e))
+        traceback.print_exc()
+        window_count = 0
+    
+    # -----------------------------------------------------------------------
+    # STEP 5: PROCESS DOORS
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 5: PROCESSING DOORS")
+        
+        studs, headers = split_studs_headers(door_elems, view)
+        
+        if len(studs) < 2:
+            Log.warn("Not enough studs - skipping doors")
+            door_groups = []
+            door_output = []
+            door_side_map = {}
+        else:
+            pairs = group_door_studs(studs)
+            door_groups = build_door_groups(pairs)
+            door_output = match_headers(pairs, headers)
+            Log.info("Matched %d doors", len(door_output))
+            
+    except Exception as e:
+        Log.error("Step 5 failed: %s", str(e))
+        traceback.print_exc()
+        door_groups = []
+        door_output = []
+        door_side_map = {}
+    
+    # -----------------------------------------------------------------------
+    # STEP 6: ASSIGN DOORS TO SIDES
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 6: ASSIGNING DOORS TO SIDES")
+        
+        if door_groups:
+            door_side_map = {}
+            
+            for d in door_groups:
+                did = d["id"]
+                cx, cy = d["center"]
+                xmin_b, xmax_b, ymin_b, ymax_b = bounds
+                
+                distances = {
+                    "A": abs(cx - xmin_b),
+                    "C": abs(cx - xmax_b),
+                    "B": abs(cy - ymin_b),
+                    "D": abs(cy - ymax_b)
+                }
+                side = min(distances, key=distances.get)
+                
+                door_side_map[did] = side
+                side_summary[side]["door"].append(did)
+            
+            Log.info("Assigned %d doors", len(door_side_map))
+        else:
+            door_side_map = {}
+        
+        # Save results
+        save_side_summary(side_summary)
+        if door_output:
+            save_door_output(door_output)
+            
+    except Exception as e:
+        Log.error("Step 6 failed: %s", str(e))
+        traceback.print_exc()
+        door_side_map = {}
+    
+    # -----------------------------------------------------------------------
+    # STEP 7: EXPORT BIM
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 7: EXPORTING BIM GEOMETRY")
+        bim_export = export_bim_geometry(
+            doc, view, side_summary, door_output, door_side_map, floor_split
+        )
+        save_sequences(bim_export, side_summary)
+        
+    except Exception as e:
+        Log.error("Step 7 failed: %s", str(e))
+        traceback.print_exc()
+        forms.alert("BIM export failed. See console.", exitscript=True)
+        return
+    
+    # -----------------------------------------------------------------------
+    # STEP 8: LOAD YOLO
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 8: LOADING YOLO DETECTIONS")
+        yolo = load_yolo()
+        Log.info("Loaded %d YOLO detections", len(yolo))
+        
+    except Exception as e:
+        Log.error("Step 8 failed: %s", str(e))
+        traceback.print_exc()
+        forms.alert("Cannot load YOLO detections. Check path.", exitscript=True)
+        return
+    
+    # -----------------------------------------------------------------------
+    # STEP 9: CLASSIFY SIDE
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 9: CLASSIFYING FACADE SIDE")
+        classified_side, score = classify_yolo_side(yolo, bim_export)
+        
+        Log.info("=" * 70)
+        Log.info("CLASSIFIED SIDE: %s", classified_side)
+        Log.info("CONFIDENCE SCORE: %.3f", score)
+        Log.info("=" * 70)
+        
+    except Exception as e:
+        Log.error("Step 9 failed: %s", str(e))
+        traceback.print_exc()
+        classified_side = "A"
+        score = 0.0
+    
+    # -----------------------------------------------------------------------
+    # STEP 10: MATCH YOLO TO BIM
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 10: MATCHING YOLO TO BIM")
+        matches = match_yolo_to_bim(yolo, bim_export, classified_side)
+        
+        Log.info("Match Results:")
+        for m in matches:
+            if m.get("bim_id"):
+                Log.info("  YOLO %s (%s) -> BIM %s (dist=%.4f)",
+                        m["yolo_id"], m["label"], m["bim_id"], m.get("distance", 0))
+            else:
+                Log.info("  YOLO %s (%s) -> NO MATCH (%s)",
+                        m["yolo_id"], m["label"], m.get("note", ""))
+        
+        save_yolo_matches(matches, classified_side, score)
+        
+    except Exception as e:
+        Log.error("Step 10 failed: %s", str(e))
+        traceback.print_exc()
+        matches = []
+    
+    # -----------------------------------------------------------------------
+    # STEP 11: HIGHLIGHT (MOST LIKELY TO CRASH - EXTRA PROTECTION)
+    # -----------------------------------------------------------------------
+    try:
+        Log.section("STEP 11: HIGHLIGHTING ELEMENTS")
+        
+        # Check if we can modify the view
+        if view.IsTemplate:
+            Log.warn("Cannot highlight in template view")
+            forms.alert("Please switch to a non-template 3D view.", exitscript=False)
+        else:
+            with revit.Transaction("Apply YOLO-BIM Highlighting"):
+                try:
+                    highlight_panels_by_side(side_summary, doc, view, highlight_only=classified_side)
+                except Exception as e:
+                    Log.warn("Panel side highlighting failed: %s", str(e))
+                
+                try:
+                    highlight_panels_by_floor(side_summary, doc, view, highlight_only=classified_side)
+                except Exception as e:
+                    Log.warn("Panel floor highlighting failed: %s", str(e))
+                
+                try:
+                    if door_output:
+                        highlight_doors(door_output, doc, view)
+                except Exception as e:
+                    Log.warn("Door highlighting failed: %s", str(e))
+            
+            Log.info("Highlighting complete")
+            
+    except Exception as e:
+        Log.error("Step 11 failed: %s", str(e))
+        traceback.print_exc()
+        forms.alert("Highlighting failed (non-critical). Data still saved.", exitscript=False)
+    
+    # -----------------------------------------------------------------------
+    # FINAL SUMMARY
+    # -----------------------------------------------------------------------
+    Log.section("PIPELINE COMPLETE")
+    
+    print("\n" + "=" * 70)
+    print("FINAL SUMMARY".center(70))
+    print("=" * 70)
+    print("  Panels:          {}".format(sum(len(side_summary[s]["panels"]) for s in SIDES)))
+    print("  Windows:         {}".format(window_count))
+    print("  Doors:           {}".format(len(door_output)))
+    print("  Classified Side: {}".format(classified_side))
+    print("  Side Score:      {:.3f}".format(score))
+    print("  YOLO Detections: {}".format(len(yolo)))
+    print("  Matched:         {}/{}".format(
+        sum(1 for m in matches if m.get("bim_id")),
+        len(matches)
+    ))
+    print("=" * 70)
+    
+    Log.info("All operations completed successfully")
 
-window_count = sum(len(side_summary[s]["windows"]) for s in FACADE_SIDES)
-Logger.info("Assigned %d windows to sides", window_count)
+# ===========================================================================
+# RUN WITH CRASH PROTECTION
+# ===========================================================================
 
-# ---------------------------------------------------------
-# STEP 6 — ASSIGN DOORS TO SIDES
-# ---------------------------------------------------------
-Logger.subsection("Step 6: Assigning Doors to Sides")
-
-door_side_map = classify_door_side(door_groups, bounds)
-
-for did, side in door_side_map.items():
-    side_summary[side]["door"].append(did)
-
-save_side_summary(side_summary)
-
-# ---------------------------------------------------------
-# STEP 7 — MATCH HEADERS TO DOOR STUDS
-# ---------------------------------------------------------
-Logger.subsection("Step 7: Matching Headers to Doors")
-
-door_output = match_headers_for_door(pairs, headers, view)
-save_door_output(door_output)
-
-Logger.info("Matched %d doors with headers", len(door_output))
-
-# ---------------------------------------------------------
-# STEP 8 — EXPORT BIM GEOMETRY
-# ---------------------------------------------------------
-Logger.subsection("Step 8: Exporting BIM Geometry")
-
-from config import PATHS
-bim_export = export_bim_geometry(
-    doc, view, side_summary, door_output, door_side_map, 
-    PATHS["bim_export"]
-)
-
-# Save sequences
-save_side_sequences(bim_export, side_summary)
-
-# ---------------------------------------------------------
-# STEP 9 — LOAD YOLO AND CLASSIFY SIDE
-# ---------------------------------------------------------
-Logger.subsection("Step 9: YOLO Side Classification")
-
-yolo = load_yolo_detections()
-classified_side, score = classify_side(yolo, bim_export)
-
-Logger.info("Classified side: %s | Score: %.3f", classified_side, score)
-
-# ---------------------------------------------------------
-# STEP 10 — YOLO–BIM MATCHING
-# ---------------------------------------------------------
-Logger.subsection("Step 10: Matching YOLO to BIM")
-
-matches = match_all_yolo_to_bim(yolo, bim_export, classified_side)
-
-Logger.info("Generated %d YOLO-BIM matches", len(matches))
-
-# Print match summary
-matched_count = sum(1 for m in matches if m.get("bim_id") is not None)
-Logger.info("Successfully matched: %d/%d", matched_count, len(matches))
-
-save_yolo_bim_matches(matches, classified_side, score)
-
-# ---------------------------------------------------------
-# STEP 11 — HIGHLIGHTING (SINGLE TRANSACTION)
-# ---------------------------------------------------------
-Logger.subsection("Step 11: Highlighting Elements in Revit")
-
-with revit.Transaction("Apply All Highlighting"):
-    highlight_panels_by_side(side_summary, doc, view, highlight_only=classified_side)
-    highlight_panels_by_floor(side_summary, doc, view, highlight_only=classified_side)
-    highlight_door(door_output, None, doc, view)
-
-Logger.info("Highlighting complete for side: %s", classified_side)
-
-# ---------------------------------------------------------
-# PIPELINE COMPLETE
-# ---------------------------------------------------------
-Logger.section("PIPELINE COMPLETE")
-Logger.info("All operations finished successfully")
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        print("\n" + "=" * 70)
+        print("UNHANDLED EXCEPTION")
+        print("=" * 70)
+        print(str(e))
+        traceback.print_exc()
+        print("=" * 70)
+        forms.alert("Script crashed. Check console for details.", exitscript=False)
