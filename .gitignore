@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 .env
 
+Exp.pushbutton/backups/
 Exp.pushbutton/detector/backup/
 Exp.pushbutton/detector/backup2/
 
