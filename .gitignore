@@ -1,0 +1,12 @@
+*.pyc
+__pycache__/
+*.rvt
+*.log
+.DS_Store
+.env
+
+Exp.pushbutton/detector/backup/
+Exp.pushbutton/detector/backup2/
+
+Reset.pushbutton/
+detect.pushbutton/
