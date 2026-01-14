@@ -92,9 +92,15 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
         }
     }
     
-    # Create panel lookup dictionary - THIS WAS MISSING!
-    panel_lookup = {pg["id"]: pg for pg in panel_groups}
-    
+    # Create panel lookup dictionary - maps panel_group ID to panel_group
+    # Create panel lookup dictionary - maps ELEMENT ID to panel_group
+    panel_lookup = {}
+
+    for pg in panel_groups:
+        for eid in pg.get("element_ids", []):
+            panel_lookup[eid] = pg
+
+    Log.debug("Panel lookup created with %d element IDs", len(panel_lookup))    
     # -----------------------------------------------------------------------
     # Process each side
     # -----------------------------------------------------------------------
@@ -105,10 +111,11 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
         side_elements_raw = []
         xs = []
         
-        # Collect X coordinates from all panels on this side to get width
-        for pid in side_summary[side].get("wall_panels", []):
-            pg = panel_lookup.get(pid)
+        # side_summary["wall_panels"] now contains panel_group IDs (not element IDs)
+        for panel_id in side_summary[side].get("wall_panels", []):
+            pg = panel_lookup.get(panel_id)
             if not pg:
+                Log.debug("Panel group %d not found in lookup", panel_id)
                 continue
             xs.extend([pg["xmin"], pg["xmax"]])
         
@@ -133,8 +140,8 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
         # ---------------------------------------------------------------
         # Collect PANELS for this side
         # ---------------------------------------------------------------
-        for pid in side_summary[side].get("wall_panels", []):
-            pg = panel_lookup.get(pid)
+        for panel_id in side_summary[side].get("wall_panels", []):
+            pg = panel_lookup.get(panel_id)
             if not pg:
                 continue
             
@@ -143,7 +150,7 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
             
             side_elements_raw.append({
                 "type": "wall_panels",
-                "id": pid,
+                "id": panel_id,  # Use panel_group ID
                 "floor": floor,
                 "xmin": pg["xmin"],
                 "xmax": pg["xmax"],
