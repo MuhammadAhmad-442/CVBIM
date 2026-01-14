@@ -1,25 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 ═══════════════════════════════════════════════════════════════════════════
-CLASSIFICATION.PY - SIDE, FLOOR & DOOR CLASSIFICATION
-═══════════════════════════════════════════════════════════════════════════
-
-PURPOSE:
-    Classify building elements by:
-        - Side (A/B/C/D facades)
-        - Floor (1/2)
-        - Door grouping (studs + headers)
-
-SECTIONS:
-    1. Floor Classification
-    2. Side Classification (Panels & Doors)
-    3. Door Component Processing
-    4. YOLO Side Classification
+CLASSIFICATION.PY - SIDE, FLOOR & DOOR CLASSIFICATION (FIXED FOR CFS)
 ═══════════════════════════════════════════════════════════════════════════
 """
 from config import STUD_HEIGHT_THRESHOLD_MM, SIDE_WEIGHTS, INTERIOR_THRESHOLD, Log, SIDES
-from core import dims, center_xy, center_z, compute_bounds, init_side_summary
-from core import dims, center_xy, center_z, compute_bounds, init_side_summary, get_element_id
+from core import dims, mid_xy, center_z, compute_bounds, init_side_summary, get_element_id
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1: FLOOR CLASSIFICATION
@@ -78,43 +64,6 @@ def classify_side(cx, cy, bounds):
     return min(distances, key=distances.get)
 
 
-def classify_all_panels(panel_elems, view):
-    """
-    Classify all panels by side and floor.
-    
-    Returns:
-        tuple: (side_summary, bounds, floor_split)
-    """
-    Log.section("CLASSIFYING PANELS")
-    
-    bounds = compute_bounds(panel_elems, view)
-    floor_split = compute_floor_split(panel_elems, view)
-    side_summary = init_side_summary()
-    
-    for p in panel_elems:
-        pid = p.Id.IntegerValue
-        d = dims(p, view)
-        if not d:
-            continue
-        
-        cx, cy = center_xy(d)
-        side = classify_side(cx, cy, bounds)
-        floor = classify_floor(d, floor_split)
-        
-        side_summary[side]["panels"].append(pid)
-        side_summary[side][floor].append(pid)
-    
-    # Log summary
-    for s in SIDES:
-        Log.info("Side %s: %d panels (floor1=%d, floor2=%d)", 
-                s,
-                len(side_summary[s]["panels"]),
-                len(side_summary[s]["floor1"]),
-                len(side_summary[s]["floor2"]))
-    
-    return side_summary, bounds, floor_split
-
-
 def classify_windows(window_elems, view, bounds, side_summary):
     """Assign windows to sides (modifies side_summary in-place)."""
     for e in window_elems:
@@ -122,7 +71,7 @@ def classify_windows(window_elems, view, bounds, side_summary):
         if not d:
             continue
         
-        cx, cy = center_xy(d)
+        cx, cy = mid_xy(d)
         side = classify_side(cx, cy, bounds)
         side_summary[side]["windows"].append(e.Id.IntegerValue)
     
@@ -152,12 +101,108 @@ def classify_doors(door_groups, bounds, side_summary):
     return door_side_map
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3: DOOR COMPONENT PROCESSING
+# SECTION 3: PANEL CLASSIFICATION (NO GROUPING - CLASSIFY INDIVIDUAL ELEMENTS)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def classify_all_panels(panel_elems, view):
+    """
+    Classify all panel ELEMENTS by side and floor.
+    Uses your reference logic - NO grouping of sub-elements.
+    
+    Returns:
+        tuple: (side_summary, bounds, floor_split, panel_groups)
+    """
+    Log.section("CLASSIFYING PANELS")
+    
+    # STEP 1: Compute bounds from panel elements
+    xs, ys = [], []
+    for e in panel_elems:
+        d = dims(e, view)
+        if not d:
+            continue
+        xs.extend([d[3], d[4]])
+        ys.extend([d[5], d[6]])
+    
+    if not xs or not ys:
+        raise Exception("Could not determine building bounds - no panel data")
+    
+    bounds = (min(xs), max(xs), min(ys), max(ys))
+    Log.info("Bounds: xmin=%.2f xmax=%.2f ymin=%.2f ymax=%.2f", *bounds)
+    
+    # STEP 2: Compute floor split
+    floor_split = compute_floor_split(panel_elems, view)
+    Log.info("Floor split: %.2f mm", floor_split)
+    
+    # STEP 3: Initialize side summary
+    side_summary = init_side_summary()
+    
+    # STEP 4: Classify each panel element individually
+    for p in panel_elems:
+        pid = p.Id.IntegerValue
+        d = dims(p, view)
+        if not d:
+            continue
+        
+        # Classify side (nearest facade)
+        cx, cy = mid_xy(d)
+        side = classify_side(cx, cy, bounds)
+        
+        # Classify floor (by Z position)
+        floor = classify_floor(d, floor_split)
+        
+        # Add to all relevant lists
+        side_summary[side]["wall_panels"].append(pid)
+        side_summary[side][floor].append(pid)
+    
+    # STEP 5: Create panel_groups for export compatibility
+    # Each "group" is actually just one element, but we create the structure
+    panel_groups = []
+    group_id = 1
+    
+    for p in panel_elems:
+        d = dims(p, view)
+        if not d:
+            continue
+        
+        cx, cy = mid_xy(d)
+        z = center_z(d)
+        floor_label = "floor1" if z < floor_split else "floor2"
+        
+        panel_groups.append({
+            "id": group_id,
+            "elements": [p],
+            "element_ids": [p.Id.IntegerValue],
+            "center": (cx, cy),
+            "xmin": d[3],
+            "xmax": d[4],
+            "ymin": d[5],
+            "ymax": d[6],
+            "zmin": d[7],
+            "zmax": d[8],
+            "floor": floor_label
+        })
+        group_id += 1
+    
+    Log.info("Created %d panel groups (1 element each)", len(panel_groups))
+    
+    # Log summary
+    for s in SIDES:
+        Log.info("Side %s: %d panels (floor1=%d, floor2=%d)", 
+                s,
+                len(side_summary[s]["wall_panels"]),
+                len(side_summary[s]["floor1"]),
+                len(side_summary[s]["floor2"]))
+    
+    return side_summary, bounds, floor_split, panel_groups
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 4: DOOR COMPONENT PROCESSING
 # ═══════════════════════════════════════════════════════════════════════════
 
 def split_studs_headers(door_elems, view):
     """
     Split door elements into studs (tall/vertical) and headers (short/horizontal).
+    Uses 500mm threshold.
     
     Returns:
         tuple: (studs, headers) - each is list of (element, dims)
@@ -165,21 +210,39 @@ def split_studs_headers(door_elems, view):
     studs = []
     headers = []
     
+    Log.info("Analyzing %d door elements...", len(door_elems))
+    Log.info("Using threshold: 500.0 mm (height > 500mm = stud)")
+    
     for e in door_elems:
         d = dims(e, view)
         if not d:
             continue
         
         height = d[2]
-        if height > STUD_HEIGHT_THRESHOLD_MM:
+        width = d[0]
+        
+        # Get element name for debugging
+        fam, typ = "", ""
+        try:
+            fam = e.Symbol.Family.Name
+            typ = e.Symbol.Name
+        except:
+            pass
+        
+        # Use 500mm threshold
+        if height > 500.0:
             studs.append((e, d))
+            Log.info("  STUD: %s %s | H=%.1fmm W=%.1fmm ID=%d", 
+                     fam, typ, height, width, e.Id.IntegerValue)
         else:
             headers.append((e, d))
+            Log.info("  HEADER: %s %s | H=%.1fmm W=%.1fmm ID=%d", 
+                     fam, typ, height, width, e.Id.IntegerValue)
     
     Log.info("Found %d studs, %d headers", len(studs), len(headers))
     
     if len(studs) < 2:
-        Log.warn("Not enough studs found: %d", len(studs))
+        Log.warn("Not enough studs found: %d (need at least 2 per door)", len(studs))
     if len(headers) < 1:
         Log.warn("No headers found")
     
@@ -200,8 +263,8 @@ def group_door_studs(studs):
     studs_sorted = sorted(studs, key=lambda sd: center_z(sd[1]))
     
     # Split into floors
-    floor1 = sorted(studs_sorted[0:2], key=lambda sd: center_xy(sd[1])[0])  # by X
-    floor2 = sorted(studs_sorted[2:4], key=lambda sd: center_xy(sd[1])[0])
+    floor1 = sorted(studs_sorted[0:2], key=lambda sd: mid_xy(sd[1])[0])  # by X
+    floor2 = sorted(studs_sorted[2:4], key=lambda sd: mid_xy(sd[1])[0])
     
     pairs = [(floor1[0], floor1[1]), (floor2[0], floor2[1])]
     
@@ -216,13 +279,13 @@ def build_door_groups(pairs):
     groups = []
     
     for idx, ((eL, dL), (eR, dR)) in enumerate(pairs, 1):
-        cxL, cyL = center_xy(dL)
-        cxR, cyR = center_xy(dR)
+        cxL, cyL = mid_xy(dL)
+        cxR, cyR = mid_xy(dR)
         
         groups.append({
             "id": idx,
-            "stud_left": get_element_id(eL),  # FIXED
-            "stud_right": get_element_id(eR),  # FIXED
+            "stud_left": get_element_id(eL),
+            "stud_right": get_element_id(eR),
             "center": ((cxL + cxR) / 2.0, (cyL + cyR) / 2.0),
             "dims_left": dL,
             "dims_right": dR
@@ -267,16 +330,16 @@ def match_headers(pairs, headers):
         unused_headers.remove(best)
         
         # Calculate door dimensions
-        cxL, _ = center_xy(dL)
-        cxR, _ = center_xy(dR)
+        cxL, _ = mid_xy(dL)
+        cxR, _ = mid_xy(dR)
         width = abs(cxR - cxL)
         height = abs(dH[7] - min(dL[7], dR[7]))  # header bottom - stud bottom
         
         door_output.append({
             "door": idx,
-            "stud_left": get_element_id(eL),  # FIXED
-            "stud_right": get_element_id(eR),  # FIXED
-            "header": get_element_id(eH),  # FIXED
+            "stud_left": get_element_id(eL),
+            "stud_right": get_element_id(eR),
+            "header": get_element_id(eH),
             "width_mm": width,
             "height_mm": height,
             "dims_left": dL,
@@ -285,19 +348,19 @@ def match_headers(pairs, headers):
         })
         
         Log.info("Door %d: studs=%d,%d, header=%d, size=%.0fx%.0fmm",
-                idx, eL.Id.IntegerValue, eR.Id.IntegerValue, 
-                eH.Id.IntegerValue, width, height)
+                idx, get_element_id(eL), get_element_id(eR), 
+                get_element_id(eH), width, height)
     
     return door_output
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 4: YOLO SIDE CLASSIFICATION
+# SECTION 5: YOLO SIDE CLASSIFICATION
 # ═══════════════════════════════════════════════════════════════════════════
 
 def classify_yolo_side(yolo_detections, bim_export):
     """
     Classify which facade side the YOLO image shows.
-    Uses presence-based scoring (no distance metrics).
+    Updated to work with structured BIM export.
     
     Returns:
         tuple: (best_side, score)
@@ -305,16 +368,18 @@ def classify_yolo_side(yolo_detections, bim_export):
     if not yolo_detections:
         return "INTERIOR", 0.0
     
-    sides = sorted(bim_export.get("side_widths", {}).keys())
+    sides = list(bim_export.get("sides", {}).keys())
+    if not sides:
+        return "INTERIOR", 0.0
     
-    # Group BIM by side & type
-    bim_by_side = {s: {"door": [], "windows": [], "wall-panels": []} 
+    # Group BIM by side & type (from structured export)
+    bim_by_side = {s: {"door": [], "windows": [], "wall_panels": []} 
                    for s in sides}
     
-    for key in ("door", "windows", "wall-panels"):
-        for e in bim_export.get(key, []):
-            side = e["side"]
-            bim_by_side[side][key].append(e)
+    for side, side_data in bim_export.get("sides", {}).items():
+        for elem in side_data.get("elements", []):
+            elem_type = elem["type"]
+            bim_by_side[side][elem_type].append(elem)
     
     # Score each side
     scores = {s: 0.0 for s in sides}

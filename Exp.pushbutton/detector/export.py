@@ -1,17 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ═══════════════════════════════════════════════════════════════════════════
-EXPORT.PY - BIM EXPORT & YOLO MATCHING
-═══════════════════════════════════════════════════════════════════════════
-
-PURPOSE:
-    Export BIM geometry to JSON and match with YOLO detections.
-    Handles coordinate normalization and element matching.
-
-SECTIONS:
-    1. JSON I/O Operations
-    2. BIM Geometry Export
-    3. YOLO-BIM Matching
+EXPORT.PY - STRUCTURED BIM EXPORT & YOLO MATCHING (FIXED)
 ═══════════════════════════════════════════════════════════════════════════
 """
 import json
@@ -19,7 +9,7 @@ import os
 import time
 from Autodesk.Revit.DB import ElementId
 from config import REVIT_FT_TO_MM, PATHS, ensure_dir, Log, SIDES, YOLO_TO_BIM
-from core import dims, center_z
+from core import dims, center_z, get_element_id, mid_xy
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1: JSON I/O OPERATIONS
@@ -80,184 +70,132 @@ def save_yolo_matches(matches, classified_side, score):
     }
     save_json(export, path_key="yolo_matches")
 
-
-def save_sequences(bim_export, side_summary):
-    """
-    Save ordered element sequences per side.
-    
-    Args:
-        bim_export: Full BIM export data
-        side_summary: Side classification summary
-    """
-    sequences = {}
-    
-    # Build sequences for each side
-    for side in SIDES:
-        all_elems = []
-        
-        # Collect all elements for this side
-        for key in ("wall-panels", "door", "windows"):
-            for e in bim_export.get(key, []):
-                if e["side"] == side:
-                    all_elems.append(e)
-        
-        # Sort by normalized X position
-        all_elems.sort(key=lambda x: x["center_norm"])
-        
-        # Extract type sequence
-        sequences[side] = [e["type"] for e in all_elems]
-    
-    # Create export
-    export = {
-        "summary": {
-            "Doors": sum(len(v.get("door", [])) for v in side_summary.values()),
-            "Windows": sum(len(v.get("windows", [])) for v in side_summary.values()),
-            "Panels": sum(len(v.get("panels", [])) for v in side_summary.values())
-        },
-        "sides": sequences
-    }
-    
-    save_json(export, path_key="sequences")
-    Log.info("Saved element sequences")
-
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 2: BIM GEOMETRY EXPORT
+# SECTION 2: STRUCTURED BIM EXPORT (BY SIDE WITH SEQUENCE TAGS)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, floor_split):
+def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, floor_split, panel_groups):
     """
-    Export BIM geometry to JSON with normalized coordinates.
-    
-    Args:
-        doc: Revit document
-        view: Active view
-        side_summary: Side classification data
-        door_output: Door detection results
-        door_side_map: Mapping of door IDs to sides
-        floor_split: Z-coordinate threshold between floors
+    Export BIM geometry STRUCTURED BY SIDE with sequential tags.
     
     Returns:
-        dict: Full BIM export data
+        dict: Structured BIM export
     """
-    Log.section("EXPORTING BIM GEOMETRY")
+    Log.section("EXPORTING STRUCTURED BIM GEOMETRY")
     
     export = {
-        "door": [],
-        "windows": [],
-        "wall-panels": [],
-        "side_widths": {}
+        "sides": {},
+        "summary": {
+            "total_doors": 0,
+            "total_windows": 0,
+            "total_panels": 0
+        }
     }
     
-    # ---------------------------------------------------------------
-    # Calculate side widths from panels
-    # ---------------------------------------------------------------
-    side_min_x = {}
+    # Create panel lookup dictionary - THIS WAS MISSING!
+    panel_lookup = {pg["id"]: pg for pg in panel_groups}
     
+    # -----------------------------------------------------------------------
+    # Process each side
+    # -----------------------------------------------------------------------
     for side in SIDES:
-        xs = []
-        for pid in side_summary[side].get("panels", []):
-            elem = doc.GetElement(ElementId(pid))
-            if not elem:
-                continue
-            d = dims(elem, view)
-            if d:
-                xs.extend([d[3], d[4]])  # xmin, xmax
+        Log.info("Processing side %s...", side)
         
-        if xs:
-            side_min_x[side] = min(xs)
-            export["side_widths"][side] = max(xs) - min(xs)
-        else:
-            side_min_x[side] = 0.0
-            export["side_widths"][side] = 0.0
-    
-    Log.debug("Side widths calculated: %s", export["side_widths"])
-    
-    # ---------------------------------------------------------------
-    # Helper: normalize X coordinate per side
-    # ---------------------------------------------------------------
-    def normalize_x(xmin, xmax, side):
-        """Convert absolute X to normalized [0-1] coordinate per side."""
-        center = (xmin + xmax) / 2.0
-        local_min = side_min_x.get(side, 0.0)
-        width = export["side_widths"].get(side, 1.0)
-        return (center - local_min) / width if width > 0 else 0.0
-    
-    # ---------------------------------------------------------------
-    # Export PANELS
-    # ---------------------------------------------------------------
-    for side in SIDES:
-        for pid in side_summary[side].get("panels", []):
-            elem = doc.GetElement(ElementId(pid))
-            if not elem:
+        # Calculate side width from panels
+        side_elements_raw = []
+        xs = []
+        
+        # Collect X coordinates from all panels on this side to get width
+        for pid in side_summary[side].get("wall_panels", []):
+            pg = panel_lookup.get(pid)
+            if not pg:
+                continue
+            xs.extend([pg["xmin"], pg["xmax"]])
+        
+        if not xs:
+            Log.warn("No panels found on side %s - skipping", side)
+            continue
+        
+        side_min_x = min(xs)
+        side_max_x = max(xs)
+        side_width = side_max_x - side_min_x
+        
+        # ---------------------------------------------------------------
+        # Helper: normalize X coordinate for this side
+        # ---------------------------------------------------------------
+        def normalize_x(xmin, xmax):
+            """Convert absolute X to normalized [0-1] coordinate for this side."""
+            center = (xmin + xmax) / 2.0
+            if side_width > 0:
+                return (center - side_min_x) / side_width
+            return 0.0
+        
+        # ---------------------------------------------------------------
+        # Collect PANELS for this side
+        # ---------------------------------------------------------------
+        for pid in side_summary[side].get("wall_panels", []):
+            pg = panel_lookup.get(pid)
+            if not pg:
                 continue
             
-            d = dims(elem, view)
-            if not d:
-                continue
+            # Determine floor from panel group
+            floor = 1 if pg["floor"] == "floor1" else 2
             
-            # Determine floor
-            floor = 1 if pid in side_summary[side].get("floor1", []) else 2
-            
-            export["wall-panels"].append({
+            side_elements_raw.append({
+                "type": "wall_panels",
                 "id": pid,
-                "type": "wall-panels",
-                "side": side,
                 "floor": floor,
-                "xmin": d[3],
-                "xmax": d[4],
-                "side_width_mm": export["side_widths"][side],
-                "center_norm": normalize_x(d[3], d[4], side)
+                "xmin": pg["xmin"],
+                "xmax": pg["xmax"],
+                "position": normalize_x(pg["xmin"], pg["xmax"])
             })
-    
-    # ---------------------------------------------------------------
-    # Export DOORS (composite: studs + header)
-    # ---------------------------------------------------------------
-    if door_output and door_side_map:
-        for d in door_output:
-            did = d["door"]
-            side = door_side_map.get(did)
-            if not side:
-                continue
-            
-            # Get composite bounds from all door components
-            elems = [
-                doc.GetElement(ElementId(d["stud_left"])),
-                doc.GetElement(ElementId(d["stud_right"])),
-                doc.GetElement(ElementId(d["header"]))
-            ]
-            
-            xs = []
-            zs = []
-            for e in elems:
-                if not e:
+        
+        # ---------------------------------------------------------------
+        # Collect DOORS for this side
+        # ---------------------------------------------------------------
+        if door_output and door_side_map:
+            for d in door_output:
+                did = d["door"]
+                if door_side_map.get(did) != side:
                     continue
-                dd = dims(e, view)
-                if dd:
-                    xs.extend([dd[3], dd[4]])
-                    zs.append(center_z(dd))
-            
-            if not xs:
-                continue
-            
-            xmin, xmax = min(xs), max(xs)
-            avg_z = sum(zs) / len(zs) if zs else 0.0
-            floor = 1 if avg_z < floor_split else 2
-            
-            export["door"].append({
-                "id": did,
-                "type": "door",
-                "side": side,
-                "floor": floor,
-                "xmin": xmin,
-                "xmax": xmax,
-                "side_width_mm": export["side_widths"][side],
-                "center_norm": normalize_x(xmin, xmax, side)
-            })
-    
-    # ---------------------------------------------------------------
-    # Export WINDOWS
-    # ---------------------------------------------------------------
-    for side in SIDES:
+                
+                # Get composite bounds from all door components
+                elems = [
+                    doc.GetElement(ElementId(d["stud_left"])),
+                    doc.GetElement(ElementId(d["stud_right"])),
+                    doc.GetElement(ElementId(d["header"]))
+                ]
+                
+                xs_door = []
+                zs = []
+                for e in elems:
+                    if not e:
+                        continue
+                    dd = dims(e, view)
+                    if dd:
+                        xs_door.extend([dd[3], dd[4]])
+                        zs.append(center_z(dd))
+                
+                if not xs_door:
+                    continue
+                
+                xmin_door = min(xs_door)
+                xmax_door = max(xs_door)
+                avg_z = sum(zs) / len(zs) if zs else 0.0
+                floor = 1 if avg_z < floor_split else 2
+                
+                side_elements_raw.append({
+                    "type": "door",
+                    "id": did,
+                    "floor": floor,
+                    "xmin": xmin_door,
+                    "xmax": xmax_door,
+                    "position": normalize_x(xmin_door, xmax_door)
+                })
+        
+        # ---------------------------------------------------------------
+        # Collect WINDOWS for this side
+        # ---------------------------------------------------------------
         for wid in side_summary[side].get("windows", []):
             elem = doc.GetElement(ElementId(wid))
             if not elem:
@@ -270,42 +208,88 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
             # Classify floor by Z
             floor = 1 if center_z(d) < floor_split else 2
             
-            export["windows"].append({
-                "id": wid,
+            side_elements_raw.append({
                 "type": "window",
-                "side": side,
+                "id": wid,
                 "floor": floor,
                 "xmin": d[3],
                 "xmax": d[4],
-                "side_width_mm": export["side_widths"][side],
-                "center_norm": normalize_x(d[3], d[4], side)
+                "position": normalize_x(d[3], d[4])
             })
+        
+        # ---------------------------------------------------------------
+        # Sort elements by position and assign sequential tags
+        # ---------------------------------------------------------------
+        side_elements_raw.sort(key=lambda x: x["position"])
+        
+        # Assign sequential tags (1, 2, 3, ...)
+        elements_with_tags = []
+        for idx, elem in enumerate(side_elements_raw, start=1):
+            elements_with_tags.append({
+                "tag": idx,
+                "type": elem["type"],
+                "id": elem["id"],
+                "floor": elem["floor"],
+                "position": elem["position"],
+                "xmin": elem["xmin"],
+                "xmax": elem["xmax"]
+            })
+        
+        # ---------------------------------------------------------------
+        # Add to export
+        # ---------------------------------------------------------------
+        export["sides"][side] = {
+            "width_mm": side_width,
+            "element_count": len(elements_with_tags),
+            "elements": elements_with_tags
+        }
+        
+        Log.info("  Side %s: %d elements (width=%.2f mm)", 
+                side, len(elements_with_tags), side_width)
     
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Calculate summary
+    # -----------------------------------------------------------------------
+    for side_data in export["sides"].values():
+        for elem in side_data["elements"]:
+            if elem["type"] == "door":
+                export["summary"]["total_doors"] += 1
+            elif elem["type"] == "window":
+                export["summary"]["total_windows"] += 1
+            elif elem["type"] == "wall_panels":
+                export["summary"]["total_panels"] += 1
+    
+    # -----------------------------------------------------------------------
     # Save to file
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------------------
     save_json(export, path_key="bim_export")
     
-    Log.info("Exported: %d doors, %d windows, %d panels",
-            len(export["door"]), len(export["windows"]), len(export["wall-panels"]))
+    Log.info("="*70)
+    Log.info("Exported: %d doors, %d windows, %d panels across %d sides",
+            export["summary"]["total_doors"],
+            export["summary"]["total_windows"],
+            export["summary"]["total_panels"],
+            len(export["sides"]))
+    Log.info("="*70)
     
     return export
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3: YOLO-BIM MATCHING
+# SECTION 3: YOLO-BIM MATCHING (Updated for new structure)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def match_yolo_to_bim(yolo_detections, bim_export, classified_side):
     """
     Match YOLO detections to BIM elements by normalized X-position.
+    Uses the new structured export format.
     
     Args:
         yolo_detections: List of YOLO detection dicts
-        bim_export: BIM geometry export data
+        bim_export: Structured BIM geometry export
         classified_side: Classified facade side (A/B/C/D or INTERIOR)
     
     Returns:
-        list: Match records [{yolo_id, label, bim_id, distance}, ...]
+        list: Match records [{yolo_id, label, bim_id, bim_tag, distance}, ...]
     """
     Log.section("MATCHING YOLO TO BIM")
     
@@ -320,25 +304,28 @@ def match_yolo_to_bim(yolo_detections, bim_export, classified_side):
                 "yolo_id": det["id"],
                 "label": det["label"],
                 "bim_id": None,
+                "bim_tag": None,
                 "note": "Interior image - no exterior matching"
             })
         Log.info("Interior image detected - skipping matching")
         return matches
     
     # ---------------------------------------------------------------
-    # Validate side width
+    # Validate side exists
     # ---------------------------------------------------------------
-    side_width = bim_export.get("side_widths", {}).get(classified_side, 0.0)
-    if side_width <= 0:
-        Log.error("Invalid side width for side %s", classified_side)
+    if classified_side not in bim_export.get("sides", {}):
+        Log.error("Classified side %s not found in BIM export", classified_side)
         for det in yolo_detections:
             matches.append({
                 "yolo_id": det["id"],
                 "label": det["label"],
                 "bim_id": None,
-                "note": "Invalid side width"
+                "bim_tag": None,
+                "note": "Side not found in BIM"
             })
         return matches
+    
+    side_data = bim_export["sides"][classified_side]
     
     # ---------------------------------------------------------------
     # Process each YOLO detection
@@ -348,13 +335,13 @@ def match_yolo_to_bim(yolo_detections, bim_export, classified_side):
         floor = det.get("floor")
         yolo_x = det["center_xy_norm"][0]  # Normalized X from YOLO
         
-        # Normalize YOLO label to BIM key
-        bim_key = YOLO_TO_BIM.get(label, label)
+        # Normalize YOLO label to BIM type
+        bim_type = YOLO_TO_BIM.get(label, label)
         
-        # Filter BIM elements by side, floor, and type
+        # Filter BIM elements by type and floor
         candidates = [
-            e for e in bim_export.get(bim_key, [])
-            if e["side"] == classified_side and e["floor"] == floor
+            e for e in side_data["elements"]
+            if e["type"] == bim_type and e["floor"] == floor
         ]
         
         if not candidates:
@@ -362,25 +349,28 @@ def match_yolo_to_bim(yolo_detections, bim_export, classified_side):
                 "yolo_id": det["id"],
                 "label": label,
                 "bim_id": None,
-                "note": "No BIM elements match type/side/floor"
+                "bim_tag": None,
+                "note": "No BIM elements match type/floor on side {}".format(classified_side)
             })
             continue
         
         # Find closest BIM element by normalized X position
-        best_id = None
+        best_elem = None
         best_dist = float('inf')
         
         for elem in candidates:
-            dist = abs(elem["center_norm"] - yolo_x)
+            dist = abs(elem["position"] - yolo_x)
             if dist < best_dist:
                 best_dist = dist
-                best_id = elem["id"]
+                best_elem = elem
         
         matches.append({
             "yolo_id": det["id"],
             "label": label,
-            "bim_id": best_id,
-            "distance": best_dist
+            "bim_id": best_elem["id"],
+            "bim_tag": best_elem["tag"],
+            "distance": best_dist,
+            "side": classified_side
         })
     
     # ---------------------------------------------------------------
@@ -391,3 +381,37 @@ def match_yolo_to_bim(yolo_detections, bim_export, classified_side):
             matched, len(matches))
     
     return matches
+
+
+def save_sequences(bim_export, side_summary):
+    """
+    Save ordered element sequences per side.
+    Uses the new structured export format.
+    
+    Args:
+        bim_export: Structured BIM export data
+        side_summary: Side classification summary (for backwards compatibility)
+    """
+    sequences = {}
+    
+    # Build sequences for each side from structured export
+    for side, side_data in bim_export.get("sides", {}).items():
+        # Elements are already sorted by position with tags
+        sequences[side] = [
+            {
+                "tag": e["tag"],
+                "type": e["type"],
+                "id": e["id"],
+                "floor": e["floor"]
+            }
+            for e in side_data["elements"]
+        ]
+    
+    # Create export
+    export = {
+        "summary": bim_export.get("summary", {}),
+        "sides": sequences
+    }
+    
+    save_json(export, path_key="sequences")
+    Log.info("Saved element sequences")

@@ -3,18 +3,6 @@
 ═══════════════════════════════════════════════════════════════════════════
 CONFIG.PY - CONFIGURATION & CONSTANTS
 ═══════════════════════════════════════════════════════════════════════════
-
-PURPOSE:
-    Centralized configuration for all file paths, constants, and settings.
-    Single source of truth for project-wide parameters.
-
-SECTIONS:
-    1. File Paths
-    2. Detection Constants
-    3. Classification Weights
-    4. Logging Configuration
-    5. Helper Functions
-═══════════════════════════════════════════════════════════════════════════
 """
 import os
 
@@ -42,9 +30,17 @@ PATHS = {
 # SECTION 2: DETECTION CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Geometry
+# Geometry thresholds
 REVIT_FT_TO_MM = 304.8                  # Revit internal units → millimeters
-STUD_HEIGHT_THRESHOLD_MM = 500.0        # Min height to classify as vertical stud (vs header)
+
+# FIXED: Lower threshold for CFS models - studs can be much shorter
+STUD_HEIGHT_THRESHOLD_MM = 150.0        # Min height to classify as vertical stud (vs header)
+                                        # Headers are typically < 150mm in CFS
+                                        # Studs are typically > 150mm
+
+# Panel filtering - to exclude small framing members
+PANEL_MIN_WIDTH_MM = 500.0              # Minimum width for a panel (to filter out studs/noggins)
+PANEL_MIN_HEIGHT_MM = 500.0             # Minimum height for a panel
 
 # Facade sides
 SIDES = ["A", "B", "C", "D"]            # A=left, B=bottom, C=right, D=top
@@ -57,7 +53,7 @@ SIDES = ["A", "B", "C", "D"]            # A=left, B=bottom, C=right, D=top
 SIDE_WEIGHTS = {
     "door": 3.0,
     "windows": 2.0,
-    "wall-panels": 1.0
+    "wall_panels": 1.0
 }
 
 INTERIOR_THRESHOLD = 0.5                # Below this score → interior image
@@ -66,7 +62,7 @@ INTERIOR_THRESHOLD = 0.5                # Below this score → interior image
 YOLO_TO_BIM = {
     "door": "door",
     "window": "windows",
-    "wall-panels": "wall-panels",
+    "wall_panels": "wall_panels",
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
