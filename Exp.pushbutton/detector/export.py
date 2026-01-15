@@ -92,15 +92,13 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
         }
     }
     
-    # Create panel lookup dictionary - maps panel_group ID to panel_group
-    # Create panel lookup dictionary - maps ELEMENT ID to panel_group
+        # Create panel lookup dictionary - maps panel GROUP ID to panel_group
     panel_lookup = {}
 
     for pg in panel_groups:
-        for eid in pg.get("element_ids", []):
-            panel_lookup[eid] = pg
+        panel_lookup[pg["id"]] = pg
 
-    Log.debug("Panel lookup created with %d element IDs", len(panel_lookup))    
+    Log.debug("Panel lookup created with %d panel groups", len(panel_lookup))    
     # -----------------------------------------------------------------------
     # Process each side
     # -----------------------------------------------------------------------

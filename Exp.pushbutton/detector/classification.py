@@ -101,13 +101,125 @@ def classify_doors(door_groups, bounds, side_summary):
     return door_side_map
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3: PANEL CLASSIFICATION (NO GROUPING - CLASSIFY INDIVIDUAL ELEMENTS)
+# SECTION 3: PANEL GROUPING & CLASSIFICATION
 # ═══════════════════════════════════════════════════════════════════════════
+
+def group_panel_components(panel_elems, view, floor_split, proximity_threshold=200.0):
+    """
+    Group 4 wall panel sub-components into complete wall panels.
+    
+    Args:
+        panel_elems: List of panel elements
+        view: Active view
+        floor_split: Z-coordinate separating floors
+        proximity_threshold: Max distance (mm) between elements to group them
+    
+    Returns:
+        list: Panel groups, each containing ~4 sub-components
+    """
+    Log.info("Grouping wall panel components (threshold=%.1f mm)...", proximity_threshold)
+    
+    # Build element data with positions
+    elem_data = []
+    for e in panel_elems:
+        d = dims(e, view)
+        if not d:
+            continue
+        
+        cx, cy = mid_xy(d)
+        z = center_z(d)
+        
+        elem_data.append({
+            "element": e,
+            "id": e.Id.IntegerValue,
+            "dims": d,
+            "center": (cx, cy, z),
+            "floor": "floor1" if z < floor_split else "floor2",
+            "grouped": False
+        })
+    
+    Log.info("Found %d panel components to group", len(elem_data))
+    
+    # Group by proximity
+    panel_groups = []
+    group_id = 1
+    
+    for i, elem in enumerate(elem_data):
+        if elem["grouped"]:
+            continue
+        
+        # Start new group
+        group = [elem]
+        elem["grouped"] = True
+        
+        # Find nearby ungrouped elements
+        for j, other in enumerate(elem_data):
+            if i == j or other["grouped"]:
+                continue
+            
+            # Check if on same floor
+            if other["floor"] != elem["floor"]:
+                continue
+            
+            # Calculate 3D distance
+            dx = elem["center"][0] - other["center"][0]
+            dy = elem["center"][1] - other["center"][1]
+            dz = elem["center"][2] - other["center"][2]
+            dist = (dx**2 + dy**2 + dz**2)**0.5
+            
+            if dist < proximity_threshold:
+                group.append(other)
+                other["grouped"] = True
+        
+        # Calculate group bounds
+        all_x = []
+        all_y = []
+        all_z = []
+        
+        for g in group:
+            d = g["dims"]
+            all_x.extend([d[3], d[4]])
+            all_y.extend([d[5], d[6]])
+            all_z.extend([d[7], d[8]])
+        
+        xmin, xmax = min(all_x), max(all_x)
+        ymin, ymax = min(all_y), max(all_y)
+        zmin, zmax = min(all_z), max(all_z)
+        
+        panel_groups.append({
+            "id": group_id,
+            "elements": [g["element"] for g in group],
+            "element_ids": [g["id"] for g in group],
+            "center": ((xmin + xmax) / 2.0, (ymin + ymax) / 2.0),
+            "xmin": xmin,
+            "xmax": xmax,
+            "ymin": ymin,
+            "ymax": ymax,
+            "zmin": zmin,
+            "zmax": zmax,
+            "floor": group[0]["floor"],
+            "component_count": len(group)
+        })
+        
+        group_id += 1
+    
+    Log.info("Created %d panel groups from %d components", len(panel_groups), len(elem_data))
+    
+    # Log component distribution
+    counts = {}
+    for pg in panel_groups:
+        count = pg["component_count"]
+        counts[count] = counts.get(count, 0) + 1
+    
+    for count in sorted(counts.keys()):
+        Log.info("  %d groups with %d components", counts[count], count)
+    
+    return panel_groups
+
 
 def classify_all_panels(panel_elems, view):
     """
-    Classify all panel ELEMENTS by side and floor.
-    Uses your reference logic - NO grouping of sub-elements.
+    Classify all panels by side and floor, then group 4 components per panel.
     
     Returns:
         tuple: (side_summary, bounds, floor_split, panel_groups)
@@ -133,10 +245,10 @@ def classify_all_panels(panel_elems, view):
     floor_split = compute_floor_split(panel_elems, view)
     Log.info("Floor split: %.2f mm", floor_split)
     
-    # STEP 3: Initialize side summary
+    # STEP 3: Initialize side summary and classify individual elements
     side_summary = init_side_summary()
     
-    # STEP 4: Classify each panel element individually
+    # Classify each panel element individually (ORIGINAL WORKING LOGIC)
     for p in panel_elems:
         pid = p.Id.IntegerValue
         d = dims(p, view)
@@ -150,40 +262,89 @@ def classify_all_panels(panel_elems, view):
         # Classify floor (by Z position)
         floor = classify_floor(d, floor_split)
         
-        # Add to all relevant lists
+        # Add to all relevant lists (ELEMENT IDs for now)
         side_summary[side]["wall_panels"].append(pid)
         side_summary[side][floor].append(pid)
     
-    # STEP 5: Create panel_groups for export compatibility
-    # Each "group" is actually just one element, but we create the structure
+    Log.info("Classified %d individual panel elements", len(panel_elems))
+    
+    # STEP 4: Group the 4 components per side+floor into panel groups
     panel_groups = []
     group_id = 1
     
-    for p in panel_elems:
-        d = dims(p, view)
-        if not d:
-            continue
-        
-        cx, cy = mid_xy(d)
-        z = center_z(d)
-        floor_label = "floor1" if z < floor_split else "floor2"
-        
-        panel_groups.append({
-            "id": group_id,
-            "elements": [p],
-            "element_ids": [p.Id.IntegerValue],
-            "center": (cx, cy),
-            "xmin": d[3],
-            "xmax": d[4],
-            "ymin": d[5],
-            "ymax": d[6],
-            "zmin": d[7],
-            "zmax": d[8],
-            "floor": floor_label
-        })
-        group_id += 1
+    # Create element lookup
+    elem_lookup = {e.Id.IntegerValue: e for e in panel_elems}
     
-    Log.info("Created %d panel groups (1 element each)", len(panel_groups))
+    for side in SIDES:
+        for floor in ["floor1", "floor2"]:
+            element_ids = side_summary[side][floor]
+            
+            if len(element_ids) != 4:
+                Log.warn("Side %s %s has %d elements (expected 4)", side, floor, len(element_ids))
+            
+            if not element_ids:
+                continue
+            
+            # Get elements for this group
+            group_elements = [elem_lookup[eid] for eid in element_ids if eid in elem_lookup]
+            
+            # Calculate composite bounds
+            all_x, all_y, all_z = [], [], []
+            for e in group_elements:
+                d = dims(e, view)
+                if d:
+                    all_x.extend([d[3], d[4]])
+                    all_y.extend([d[5], d[6]])
+                    all_z.extend([d[7], d[8]])
+            
+            if not all_x:
+                continue
+            
+            xmin, xmax = min(all_x), max(all_x)
+            ymin, ymax = min(all_y), max(all_y)
+            zmin, zmax = min(all_z), max(all_z)
+            
+            # Create panel group
+            panel_groups.append({
+                "id": group_id,
+                "elements": group_elements,
+                "element_ids": element_ids,
+                "center": ((xmin + xmax) / 2.0, (ymin + ymax) / 2.0),
+                "xmin": xmin,
+                "xmax": xmax,
+                "ymin": ymin,
+                "ymax": ymax,
+                "zmin": zmin,
+                "zmax": zmax,
+                "floor": floor,
+                "side": side,
+                "component_count": len(element_ids)
+            })
+            
+            Log.debug("Panel group %d: Side %s, %s, %d components", 
+                     group_id, side, floor, len(element_ids))
+            
+            group_id += 1
+    
+    Log.info("Created %d panel groups (should be 8 for 4 sides × 2 floors)", len(panel_groups))
+    
+    # STEP 5: Replace element IDs with panel group IDs in side_summary
+    # Create mapping from element IDs to group IDs
+    elem_to_group = {}
+    for pg in panel_groups:
+        for eid in pg["element_ids"]:
+            elem_to_group[eid] = pg["id"]
+    
+    # Update side_summary to use group IDs instead of element IDs
+    for side in SIDES:
+        # Get unique group IDs for this side
+        group_ids = list(set(elem_to_group.get(eid) for eid in side_summary[side]["wall_panels"] if eid in elem_to_group))
+        side_summary[side]["wall_panels"] = group_ids
+        
+        # Update floor lists
+        for floor in ["floor1", "floor2"]:
+            floor_group_ids = list(set(elem_to_group.get(eid) for eid in side_summary[side][floor] if eid in elem_to_group))
+            side_summary[side][floor] = floor_group_ids
     
     # Log summary
     for s in SIDES:
@@ -386,8 +547,12 @@ def classify_yolo_side(yolo_detections, bim_export):
     
     for det in yolo_detections:
         label = det["label"]
+        
+        # Normalize YOLO labels to match BIM types
         if label == "window":
-            label = "windows"  # Normalize
+            label = "windows"
+        elif label == "wall-panels":
+            label = "wall_panels"
         
         if label not in SIDE_WEIGHTS:
             continue
@@ -409,10 +574,14 @@ def classify_yolo_side(yolo_detections, bim_export):
     
     for det in yolo_detections:
         label = det["label"]
+        
+        # Normalize for display and lookup
         if label == "window":
             label = "windows"
+        elif label == "wall-panels":
+            label = "wall_panels"
         
-        row = ("{}_{}".format(label, det.get("id", "?"))).ljust(18)
+        row = ("{}_{}".format(det["label"], det.get("id", "?"))).ljust(18)
         for s in sides:
             if label in SIDE_WEIGHTS:
                 sc = SIDE_WEIGHTS[label] if len(bim_by_side[s][label]) > 0 else 0.0
