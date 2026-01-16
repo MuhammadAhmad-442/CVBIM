@@ -46,6 +46,28 @@ PANEL_MIN_HEIGHT_MM = 500.0             # Minimum height for a panel
 SIDES = ["A", "B", "C", "D"]            # A=left, B=bottom, C=right, D=top
 
 # ═══════════════════════════════════════════════════════════════════════════
+# SECTION 2.5: INTERIOR/EXTERIOR FILTERING
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Distance threshold to classify walls as exterior vs interior
+EXTERIOR_DISTANCE_THRESHOLD_MM = 500.0  # Walls within 500mm of building bounds = EXTERIOR
+                                        # Walls farther than 500mm = INTERIOR
+
+FILTER_INTERIOR_ELEMENTS = True         # If True: only process exterior elements
+                                        # If False: process all elements
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 2.6: GROUPING BEHAVIOR SWITCHES
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Enable/disable grouping of sub-components
+GROUP_PANEL_COMPONENTS = False           # If True: group 4 wall panel sub-components into 1 panel
+                                        # If False: treat each panel element individually
+
+GROUP_DOOR_COMPONENTS = False            # If True: group studs+headers into door assemblies
+                                        # If False: treat each door element individually
+
+# ═══════════════════════════════════════════════════════════════════════════
 # SECTION 3: CLASSIFICATION WEIGHTS
 # ═══════════════════════════════════════════════════════════════════════════
 

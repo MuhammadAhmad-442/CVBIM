@@ -77,6 +77,7 @@ def save_yolo_matches(matches, classified_side, score):
 def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, floor_split, panel_groups):
     """
     Export BIM geometry STRUCTURED BY SIDE with sequential tags.
+    FIXED: Better error handling for element access.
     
     Returns:
         dict: Structured BIM export
@@ -92,13 +93,13 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
         }
     }
     
-        # Create panel lookup dictionary - maps panel GROUP ID to panel_group
+    # Create panel lookup dictionary - maps panel GROUP ID to panel_group
     panel_lookup = {}
-
     for pg in panel_groups:
         panel_lookup[pg["id"]] = pg
-
-    Log.debug("Panel lookup created with %d panel groups", len(panel_lookup))    
+    
+    Log.debug("Panel lookup created with %d panel groups", len(panel_groups))
+    
     # -----------------------------------------------------------------------
     # Process each side
     # -----------------------------------------------------------------------
@@ -109,7 +110,7 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
         side_elements_raw = []
         xs = []
         
-        # side_summary["wall_panels"] now contains panel_group IDs (not element IDs)
+        # side_summary["wall_panels"] now contains panel_group IDs (or element IDs if ungrouped)
         for panel_id in side_summary[side].get("wall_panels", []):
             pg = panel_lookup.get(panel_id)
             if not pg:
@@ -164,24 +165,42 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
                 if door_side_map.get(did) != side:
                     continue
                 
-                # Get composite bounds from all door components
-                elems = [
-                    doc.GetElement(ElementId(d["stud_left"])),
-                    doc.GetElement(ElementId(d["stud_right"])),
-                    doc.GetElement(ElementId(d["header"]))
-                ]
-                
+                # Get composite bounds from door components
+                # FIXED: Handle None values in door components
                 xs_door = []
                 zs = []
-                for e in elems:
-                    if not e:
-                        continue
-                    dd = dims(e, view)
+                
+                # Collect dimensions from all available door components
+                for key in ["dims_left", "dims_right", "dims_header"]:
+                    dd = d.get(key)
                     if dd:
                         xs_door.extend([dd[3], dd[4]])
                         zs.append(center_z(dd))
                 
+                # Fallback: try getting elements by ID if dims not available
                 if not xs_door:
+                    try:
+                        elem_ids = []
+                        if d.get("stud_left"):
+                            elem_ids.append(d["stud_left"])
+                        if d.get("stud_right"):
+                            elem_ids.append(d["stud_right"])
+                        if d.get("header"):
+                            elem_ids.append(d["header"])
+                        
+                        for eid in elem_ids:
+                            elem = doc.GetElement(ElementId(int(eid)))
+                            if elem:
+                                dd = dims(elem, view)
+                                if dd:
+                                    xs_door.extend([dd[3], dd[4]])
+                                    zs.append(center_z(dd))
+                    except Exception as ex:
+                        Log.warn("Could not get door %d dimensions: %s", did, str(ex))
+                        continue
+                
+                if not xs_door:
+                    Log.warn("Door %d has no valid dimensions, skipping", did)
                     continue
                 
                 xmin_door = min(xs_door)
@@ -202,25 +221,31 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, flo
         # Collect WINDOWS for this side
         # ---------------------------------------------------------------
         for wid in side_summary[side].get("windows", []):
-            elem = doc.GetElement(ElementId(wid))
-            if not elem:
+            try:
+                elem = doc.GetElement(ElementId(int(wid)))
+                if not elem:
+                    Log.debug("Window %d not found", wid)
+                    continue
+                
+                d = dims(elem, view)
+                if not d:
+                    Log.debug("Window %d has no dimensions", wid)
+                    continue
+                
+                # Classify floor by Z
+                floor = 1 if center_z(d) < floor_split else 2
+                
+                side_elements_raw.append({
+                    "type": "window",
+                    "id": wid,
+                    "floor": floor,
+                    "xmin": d[3],
+                    "xmax": d[4],
+                    "position": normalize_x(d[3], d[4])
+                })
+            except Exception as ex:
+                Log.warn("Could not process window %d: %s", wid, str(ex))
                 continue
-            
-            d = dims(elem, view)
-            if not d:
-                continue
-            
-            # Classify floor by Z
-            floor = 1 if center_z(d) < floor_split else 2
-            
-            side_elements_raw.append({
-                "type": "window",
-                "id": wid,
-                "floor": floor,
-                "xmin": d[3],
-                "xmax": d[4],
-                "position": normalize_x(d[3], d[4])
-            })
         
         # ---------------------------------------------------------------
         # Sort elements by position and assign sequential tags

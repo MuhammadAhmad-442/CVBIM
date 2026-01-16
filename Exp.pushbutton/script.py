@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-YOLO-BIM pipeline with crash protection and safe element collection
+YOLO-BIM pipeline with fixed door processing logic
 """
 __title__ = "YOLO-BIM Matcher"
 __author__ = "Script"
 
 import sys, os, traceback
 from pyrevit import revit, forms
-from Autodesk.Revit.DB import FilteredElementCollector, FamilyInstance
-DB = revit.DB  # shorthand if you prefer
+from Autodesk.Revit.DB import FilteredElementCollector, FamilyInstance, Wall, WallType, BuiltInCategory
+DB = revit.DB
 
 # =======================================================================
 # MAIN PIPELINE
 # =======================================================================
 
 def main():
-    """Main YOLO-BIM pipeline with full crash protection."""
+    """Main YOLO-BIM pipeline with fixed door processing."""
 
     doc = revit.doc
     view = doc.ActiveView
@@ -28,11 +28,12 @@ def main():
     # MODULE IMPORTS
     # -------------------------------------------------------------------
     try:
-        from detector.config import Log, SIDES
+        from detector.config import Log, SIDES, GROUP_DOOR_COMPONENTS
         from detector.core import build_element_cache, dims, center_xy, get_element_id
         from detector.classification import (
             classify_all_panels,
             classify_windows,
+            process_doors_simple,
             split_studs_headers,
             group_door_studs,
             build_door_groups,
@@ -79,29 +80,54 @@ def main():
     doors, windows, wall_panels = [], [], []
 
     try:
-        insts = FilteredElementCollector(doc, view.Id).OfClass(FamilyInstance)
-
-        for e in insts:
+        # Collect by actual Revit category
+        doors = list(FilteredElementCollector(doc, view.Id)
+                     .OfClass(FamilyInstance)
+                     .OfCategory(BuiltInCategory.OST_Doors)
+                     .ToElements())
+        
+        windows = list(FilteredElementCollector(doc, view.Id)
+                       .OfClass(FamilyInstance)
+                       .OfCategory(BuiltInCategory.OST_Windows)
+                       .ToElements())
+        
+        # For wall panels, use string matching
+        wall_panels = []
+        walls = FilteredElementCollector(doc, view.Id).OfClass(Wall).ToElements()
+        
+        Log.info("Total walls found in view: %d", len(walls))
+        
+        for wall in walls:
             try:
-                fam, typ, name = _safe_name(e)
-                combo = fam + " " + typ + " " + name
-
-                if " door" in combo:
-                    doors.append(e)
-                elif "window" in combo:
-                    windows.append(e)
-                elif "wall panel" in combo:
-                    wall_panels.append(e)
+                wall_type = doc.GetElement(wall.GetTypeId())
+                
+                try:
+                    type_name = wall_type.get_Parameter(DB.BuiltInParameter.SYMBOL_NAME_PARAM)
+                    if type_name:
+                        type_name = type_name.AsString()
+                    else:
+                        type_name = "Unknown"
+                except:
+                    try:
+                        type_name = wall_type.FamilyName
+                    except:
+                        try:
+                            type_name = str(wall_type.Name)
+                        except:
+                            type_name = "Unknown"
+                
+                Log.debug("Wall type found: '%s'", type_name)
+                
+                type_name_lower = type_name.lower()
+                if "wall panel" in type_name_lower or "wallpanel" in type_name_lower or "panel" in type_name_lower:
+                    wall_panels.append(wall)
+                    Log.debug("  -> MATCHED as wall panel")
             except Exception as ex:
-                Log.warn("Element skipped during collection: {}".format(ex))
+                Log.warn("Wall skipped: {}".format(ex))
                 continue
-
+        
         Log.info("Collected: doors=%d, windows=%d, wall_panels=%d",
                  len(doors), len(windows), len(wall_panels))
-
-        if not wall_panels:
-            forms.alert("No wall panels found. Check family names or active view.", exitscript=True)
-            return
 
     except Exception as e:
         Log.error("Step 1 failed: %s", str(e))
@@ -146,28 +172,53 @@ def main():
         traceback.print_exc()
 
     # -------------------------------------------------------------------
-    # STEP 5 – PROCESS DOORS (STUDS + HEADERS + GROUPS)
+    # STEP 5 – PROCESS DOORS (RESPECTS GROUP_DOOR_COMPONENTS FLAG)
     # -------------------------------------------------------------------
     try:
         Log.section("STEP 5: PROCESSING DOORS")
-        studs, headers = split_studs_headers(doors, view)
-        if len(studs) < 2:
-            Log.warn("Not enough studs for doors. Skipping door processing.")
-            door_groups, door_output, door_side_map = [], [], {}
-        else:
-            pairs = group_door_studs(studs)
-            door_groups = build_door_groups(pairs)
-            door_output = match_headers(pairs, headers)
-            Log.info("Matched %d doors", len(door_output))
+        
+        if not GROUP_DOOR_COMPONENTS:
+            # ═══════════════════════════════════════════════════════════
+            # MODE A: NO GROUPING - Each door element stays separate
+            # ═══════════════════════════════════════════════════════════
+            door_groups, door_output = process_doors_simple(doors, view, floor_split)
             
-            # STEP 6 – ASSIGN DOORS TO SIDES
-            Log.section("STEP 6: ASSIGNING DOORS TO SIDES")
-            door_side_map = classify_doors(door_groups, bounds, side_summary)
-            Log.info("Assigned %d doors", len(door_side_map))
+        else:
+            # ═══════════════════════════════════════════════════════════
+            # MODE B: GROUPING - Split studs/headers and pair them
+            # ═══════════════════════════════════════════════════════════
+            studs, headers = split_studs_headers(doors, view)
+            
+            if len(studs) < 2:
+                Log.warn("Not enough studs for door pairing. Falling back to simple processing.")
+                door_groups, door_output = process_doors_simple(doors, view, floor_split)
+            else:
+                pairs = group_door_studs(studs)
+                door_groups = build_door_groups(pairs)
+                door_output = match_headers(pairs, headers)
+        
+        Log.info("Processed %d doors", len(door_output))
+        
     except Exception as e:
         Log.error("Door processing failed: %s", str(e))
         traceback.print_exc()
-        door_groups, door_output, door_side_map = [], [], {}
+        door_groups, door_output = [], []
+
+    # -------------------------------------------------------------------
+    # STEP 6 – ASSIGN DOORS TO SIDES
+    # -------------------------------------------------------------------
+    try:
+        if door_groups:
+            Log.section("STEP 6: ASSIGNING DOORS TO SIDES")
+            door_side_map = classify_doors(door_groups, bounds, side_summary)
+            Log.info("Assigned %d doors", len(door_side_map))
+        else:
+            Log.warn("No door groups to assign to sides")
+            door_side_map = {}
+    except Exception as e:
+        Log.error("Door side assignment failed: %s", str(e))
+        traceback.print_exc()
+        door_side_map = {}
 
     # -------------------------------------------------------------------
     # STEP 7 – EXPORT BIM GEOMETRY

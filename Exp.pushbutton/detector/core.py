@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-CORE.PY - Core utilities matching your working code
+CORE.PY - Core utilities with exterior/interior filtering
 """
 from Autodesk.Revit.DB import FilteredElementCollector, FamilyInstance, ElementId
-from config import REVIT_FT_TO_MM, SIDES, Log
+from config import REVIT_FT_TO_MM, SIDES, Log, FILTER_INTERIOR_ELEMENTS, EXTERIOR_DISTANCE_THRESHOLD_MM
 
 def get_element_id(element_or_id):
     """Safely get integer ID from Element or ElementId."""
@@ -143,6 +143,66 @@ def compute_bounds(panel_elems, view):
         raise Exception("Cannot determine building bounds - no panels found")
     
     return (min(xs), max(xs), min(ys), max(ys))
+
+
+def is_exterior_element(d, bounds):
+    """
+    Determine if an element is on the exterior perimeter or interior.
+    
+    Args:
+        d: dims tuple (w, d, h, xmin, xmax, ymin, ymax, zmin, zmax)
+        bounds: (xmin, xmax, ymin, ymax) building bounds
+    
+    Returns:
+        bool: True if element is on exterior, False if interior
+    """
+    if not d:
+        return False
+    
+    cx, cy = mid_xy(d)
+    xmin_b, xmax_b, ymin_b, ymax_b = bounds
+    
+    # Calculate distance to each facade
+    dist_to_left = abs(cx - xmin_b)
+    dist_to_right = abs(cx - xmax_b)
+    dist_to_bottom = abs(cy - ymin_b)
+    dist_to_top = abs(cy - ymax_b)
+    
+    # Element is exterior if it's close to any facade
+    min_dist = min(dist_to_left, dist_to_right, dist_to_bottom, dist_to_top)
+    
+    return min_dist <= EXTERIOR_DISTANCE_THRESHOLD_MM
+
+
+def filter_exterior_elements(elements, view, bounds):
+    """
+    Filter element list to only include exterior elements.
+    
+    Args:
+        elements: List of Revit elements
+        view: Active view
+        bounds: Building bounds (xmin, xmax, ymin, ymax)
+    
+    Returns:
+        tuple: (exterior_elements, interior_count)
+    """
+    if not FILTER_INTERIOR_ELEMENTS:
+        return elements, 0
+    
+    exterior = []
+    interior_count = 0
+    
+    for e in elements:
+        d = dims(e, view)
+        if not d:
+            continue
+        
+        if is_exterior_element(d, bounds):
+            exterior.append(e)
+        else:
+            interior_count += 1
+    
+    return exterior, interior_count
 
 
 def build_element_cache(doc, view):
