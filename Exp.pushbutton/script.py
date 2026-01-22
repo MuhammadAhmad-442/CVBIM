@@ -219,22 +219,26 @@ def main():
     try:
         if door_groups:
             Log.section("STEP 6: ASSIGNING DOORS TO SIDES")
-            door_side_map = classify_doors(door_groups, bounds, side_summary)
+            result = classify_doors(door_groups, bounds, side_summary, panel_groups)
             
-            Log.subsection("Door Distribution")
-            for s in SIDES:
-                count = len(side_summary[s]["door"])
-                if count > 0:
-                    Log.info("Side %s: %d doors", s, count)
+            # Handle both tuple and dict return types
+            if isinstance(result, tuple):
+                door_side_map, door_interior_map = result
+            else:
+                # Legacy return - just door_side_map
+                door_side_map = result
+                door_interior_map = {}
             
             Log.step_timer("Door Assignment")
         else:
             Log.warn("No door groups to assign to sides")
             door_side_map = {}
+            door_interior_map = {}
     except Exception as e:
         Log.error("Door side assignment failed: %s", str(e))
         traceback.print_exc()
         door_side_map = {}
+        door_interior_map = {}
 
     # ----------------------------------------------------------------
     # STEP 7: EXPORT BIM GEOMETRY
@@ -242,7 +246,7 @@ def main():
     try:
         Log.section("STEP 7: EXPORTING BIM GEOMETRY")
         bim_export = export_bim_geometry(doc, view, side_summary, door_output,
-                                         door_side_map, floor_split, panel_groups)
+                                         door_side_map, door_interior_map, floor_split, panel_groups, bounds)
         save_sequences(bim_export, side_summary)
         save_side_summary(side_summary)
         if door_output:
@@ -308,6 +312,8 @@ def main():
         if view.IsTemplate:
             Log.warn("Cannot highlight in template view")
             forms.alert("Switch to a non-template 3D view.", exitscript=False)
+        elif classified_side == "INTERIOR":
+            Log.warn("Interior image detected - skipping highlighting")
         else:
             with revit.Transaction("Apply YOLO-BIM Highlighting"):
                 try:

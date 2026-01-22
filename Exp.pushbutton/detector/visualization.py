@@ -1,17 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ═══════════════════════════════════════════════════════════════════════════
-VISUALIZATION.PY - REVIT HIGHLIGHTING & DISPLAY
-═══════════════════════════════════════════════════════════════════════════
-
-PURPOSE:
-    Visual feedback in Revit by color-coding elements.
-    Supports highlighting by side, floor, and matched elements.
-
-SECTIONS:
-    1. Color Setup
-    2. Panel Highlighting
-    3. Door Highlighting
+VISUALIZATION.PY - REVIT HIGHLIGHTING & DISPLAY (FIXED)
 ═══════════════════════════════════════════════════════════════════════════
 """
 from Autodesk.Revit.DB import (
@@ -84,10 +74,13 @@ def highlight_panels_by_side(side_summary, doc, view, highlight_only=None):
         r, g, b = SIDE_COLORS[side]
         color = make_color(r, g, b, solid)
         
-        for pid in side_summary[side].get("panels", []):
-            elem = doc.GetElement(ElementId(pid))
-            if elem:
-                view.SetElementOverrides(elem.Id, color)
+        for pid in side_summary[side].get("wall_panels", []):
+            try:
+                elem = doc.GetElement(ElementId(int(pid)))
+                if elem:
+                    view.SetElementOverrides(elem.Id, color)
+            except Exception as ex:
+                Log.debug("Could not highlight panel %s: %s", pid, str(ex))
     
     Log.info("Highlighted panels by side: %s", highlight_only or "ALL")
 
@@ -117,19 +110,23 @@ def highlight_panels_by_floor(side_summary, doc, view, highlight_only=None, floo
             color = make_color(r, g, b, solid)
             
             for pid in side_summary[side].get(floor, []):
-                elem = doc.GetElement(ElementId(pid))
-                if elem:
-                    view.SetElementOverrides(elem.Id, color)
+                try:
+                    elem = doc.GetElement(ElementId(int(pid)))
+                    if elem:
+                        view.SetElementOverrides(elem.Id, color)
+                except Exception as ex:
+                    Log.debug("Could not highlight panel %s: %s", pid, str(ex))
     
     Log.info("Highlighted panels by floor")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3: DOOR HIGHLIGHTING
+# SECTION 3: DOOR HIGHLIGHTING (FIXED FOR NONE VALUES)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def highlight_doors(door_output, doc, view, filter_ids=None):
     """
     Highlight door elements (studs + headers).
+    FIXED: Properly handles None values in door components.
     
     Args:
         door_output: List of door data dicts
@@ -153,11 +150,26 @@ def highlight_doors(door_output, doc, view, filter_ids=None):
         if filter_ids and str(door_id) not in filter_ids:
             continue
         
-        # Highlight all components
-        for elem_id in [d["stud_left"], d["stud_right"], d["header"]]:
-            elem = doc.GetElement(ElementId(elem_id))
-            if elem:
-                view.SetElementOverrides(elem.Id, color)
-                count += 1
+        # Collect all component IDs, filtering out None values
+        component_ids = []
+        
+        if d.get("stud_left") is not None:
+            component_ids.append(d["stud_left"])
+        
+        if d.get("stud_right") is not None:
+            component_ids.append(d["stud_right"])
+        
+        if d.get("header") is not None:
+            component_ids.append(d["header"])
+        
+        # Highlight all valid components
+        for elem_id in component_ids:
+            try:
+                elem = doc.GetElement(ElementId(int(elem_id)))
+                if elem:
+                    view.SetElementOverrides(elem.Id, color)
+                    count += 1
+            except Exception as ex:
+                Log.debug("Could not highlight door component %s: %s", elem_id, str(ex))
     
     Log.info("Highlighted %d door components", count)
