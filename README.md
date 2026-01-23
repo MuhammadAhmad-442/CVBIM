@@ -4,7 +4,6 @@
 [![Python](https://img.shields.io/badge/python-2.7-blue.svg)](https://www.python.org/) [![Revit](https://img.shields.io/badge/Revit-2019+-green.svg)](https://www.autodesk.com/products/revit/) [![pyRevit](https://img.shields.io/badge/pyRevit-4.8+-orange.svg)](http://pyrevitlabs.github.io/pyRevit/)
 
 ---
-
 ## 🏗️ Architecture
 
 ```
@@ -16,7 +15,6 @@ detector/
 ├── export.py          # BIM export & YOLO matching
 └── visualization.py   # Revit highlighting
 ```
-
 ### Pipeline Flow
 
 ```mermaid
@@ -39,7 +37,6 @@ graph LR
 6. **Side Detection** → Classify which facade
 7. **Matching** → Link detections to elements
 8. **Visualization** → Color-code in Revit
-
 ---
 
 ## ✨ Features
@@ -50,7 +47,6 @@ graph LR
 - 📊 **Structured Export** - JSON output with normalized coordinates
 - 🎨 **Visual Feedback** - Color-coded element highlighting
 - 📈 **Enhanced Logging** - Detailed statistics and timing
-
 ---
 
 ## 📁 Paths
@@ -71,7 +67,6 @@ VALIDATION_DIR = os.path.join(BASE_DIR, "Validation_Output_test", "Step.2")
 - `yolo_bim_matches.json` - Detection matches
 - `side_objects_summary.json` - Classification summary
 - `side_element_sequences.json` - Ordered sequences
-
 ---
 
 ## ⚙️ Configuration
@@ -107,9 +102,7 @@ Log.SHOW_STATS = True    # Execution summary
        └─────┘
        B (Bottom)
 ```
-
 ---
-
 ## 🎨 Color Coding
 
 ### By Side
@@ -124,9 +117,7 @@ Log.SHOW_STATS = True    # Execution summary
 
 ### By Type
 - 🟠 **Doors** - Orange
-
 ---
-
 ## 📚 API Reference
 
 ### Core Utilities (`core.py`)
