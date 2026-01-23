@@ -163,9 +163,10 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, doo
             
             floor = 1 if pg["floor"] == "floor1" else 2
             
-            # Check if panel is interior
-            is_int = pg.get("is_interior", False)
-            if not is_int:
+            # FIXED: Only use fallback if is_interior key doesn't exist
+            if "is_interior" in pg:
+                is_int = pg["is_interior"]
+            else:
                 # Fallback: check using center position
                 center_dims = (0, 0, 0, pg["xmin"], pg["xmax"], pg["ymin"], pg["ymax"], pg["zmin"], pg["zmax"])
                 is_int = not is_exterior_element(center_dims, bounds)
@@ -183,7 +184,6 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, doo
                 interior_elements.append(elem_data)
             else:
                 exterior_elements.append(elem_data)
-        
         # ---------------------------------------------------------------
         # Collect DOORS
         # ---------------------------------------------------------------
@@ -194,7 +194,18 @@ def export_bim_geometry(doc, view, side_summary, door_output, door_side_map, doo
                     continue
                 
                 # Check if door is interior (fallback to exterior if not in map)
-                is_int = door_interior_map.get(did, False) if door_interior_map else False
+                if door_interior_map and did in door_interior_map:
+                    is_int = door_interior_map[did]
+                else:
+                    # GEOMETRIC FALLBACK (same logic as windows/panels)
+                    door_dims_for_test = (
+                        0, 0, 0,
+                        xmin_door, xmax_door,
+                        0, 0,
+                        avg_z, avg_z
+                    )
+                    is_int = not is_exterior_element(door_dims_for_test, bounds)
+
                 
                 # Get composite bounds
                 xs_door = []

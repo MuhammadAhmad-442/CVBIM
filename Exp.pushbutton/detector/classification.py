@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 ═══════════════════════════════════════════════════════════════════════════
-CLASSIFICATION.PY - IMPROVED SIDE ASSIGNMENT FOR INTERIOR ELEMENTS
+CLASSIFICATION.PY - FIXED TO KEEP INTERIOR ELEMENTS
 ═══════════════════════════════════════════════════════════════════════════
 """
 from config import (STUD_HEIGHT_THRESHOLD_MM, SIDE_WEIGHTS, INTERIOR_THRESHOLD, 
                     Log, SIDES, GROUP_PANEL_COMPONENTS, GROUP_DOOR_COMPONENTS,
                     FILTER_INTERIOR_ELEMENTS)
-from core import dims, mid_xy, center_z, compute_bounds, init_side_summary, get_element_id, filter_exterior_elements
+from core import dims, mid_xy, center_z, compute_bounds, init_side_summary, get_element_id, is_exterior_element
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1: FLOOR CLASSIFICATION
@@ -106,30 +106,23 @@ def classify_side(cx, cy, bounds):
 
 
 def classify_windows(window_elems, view, bounds, side_summary):
-    """Assign windows to sides with improved interior handling."""
-    from core import is_exterior_element
+    """Assign ALL windows to sides (both interior and exterior)."""
     
-    # First pass: determine which windows are interior/exterior
-    window_classification = []
+    exterior_count = 0
+    interior_count = 0
+    
     for e in window_elems:
         d = dims(e, view)
         if not d:
             continue
         
         is_ext = is_exterior_element(d, bounds)
-        window_classification.append((e, d, is_ext))
-    
-    # Filter if enabled
-    if FILTER_INTERIOR_ELEMENTS:
-        original_count = len(window_classification)
-        window_classification = [(e, d, is_ext) for e, d, is_ext in window_classification if is_ext]
-        filtered_count = original_count - len(window_classification)
         
-        if filtered_count > 0:
-            Log.filtering_summary("Windows", original_count, len(window_classification), filtered_count)
-    
-    # Assign to sides
-    for e, d, is_ext in window_classification:
+        if is_ext:
+            exterior_count += 1
+        else:
+            interior_count += 1
+        
         cx, cy = mid_xy(d)
         side = classify_side_smart(cx, cy, bounds, is_interior=not is_ext)
         side_summary[side]["windows"].append(e.Id.IntegerValue)
@@ -138,7 +131,12 @@ def classify_windows(window_elems, view, bounds, side_summary):
                  e.Id.IntegerValue, side, "exterior" if is_ext else "interior")
     
     total = sum(len(side_summary[s]["windows"]) for s in SIDES)
-    Log.info("Assigned %d windows to sides", total)
+    
+    # Log filtering summary
+    if FILTER_INTERIOR_ELEMENTS and Log.SHOW_FILTERING:
+        Log.filtering_summary("Windows", len(window_elems), exterior_count, interior_count)
+    
+    Log.info("Assigned %d windows to sides (%d ext, %d int)", total, exterior_count, interior_count)
 
 
 def classify_doors(door_groups, bounds, side_summary, panel_groups):
@@ -157,7 +155,6 @@ def classify_doors(door_groups, bounds, side_summary, panel_groups):
             door_side_map: {door_id: side}
             door_interior_map: {door_id: is_interior}
     """
-    from core import is_exterior_element
     
     door_side_map = {}
     door_interior_map = {}
@@ -170,7 +167,7 @@ def classify_doors(door_groups, bounds, side_summary, panel_groups):
     for pg in panel_groups:
         # Determine if panel is interior
         is_int = pg.get("is_interior", False)
-        if not is_int:
+        if not is_int and "is_interior" not in pg:
             # Fallback: check using center position
             center_dims = (0, 0, 0, pg["xmin"], pg["xmax"], pg["ymin"], pg["ymax"], pg["zmin"], pg["zmax"])
             is_int = not is_exterior_element(center_dims, bounds)
@@ -202,7 +199,20 @@ def classify_doors(door_groups, bounds, side_summary, panel_groups):
         
         # Determine interior/exterior based on nearest panel
         if nearest_panel:
-            is_interior = nearest_panel["is_interior"]
+            # Only trust panel interior flag if door is VERY close to panel
+            PANEL_ASSOCIATION_THRESHOLD_MM = 800.0
+            
+            if min_dist <= PANEL_ASSOCIATION_THRESHOLD_MM:
+                is_interior = nearest_panel["is_interior"]
+            else:
+                # Door is not embedded in a panel -> use geometry
+                if "dims_left" in d and d["dims_left"]:
+                    is_interior = not is_exterior_element(d["dims_left"], bounds)
+                elif "dims_right" in d and d["dims_right"]:
+                    is_interior = not is_exterior_element(d["dims_right"], bounds)
+                else:
+                    is_interior = False
+            
             Log.debug("Door %d -> nearest panel %.1fmm away (%s)", 
                      did, min_dist, "interior" if is_interior else "exterior")
         else:
@@ -248,7 +258,7 @@ def classify_doors(door_groups, bounds, side_summary, panel_groups):
 
 def classify_all_panels(panel_elems, view):
     """
-    Classify all panels by side and floor with improved interior handling.
+    Classify ALL panels by side and floor (both interior and exterior).
     
     Returns:
         tuple: (side_summary, bounds, floor_split, panel_groups)
@@ -261,11 +271,11 @@ def classify_all_panels(panel_elems, view):
         Log.info("Panel grouping: DISABLED (each element = 1 panel)")
     
     if FILTER_INTERIOR_ELEMENTS:
-        Log.info("Interior filtering: ENABLED (exterior elements only)")
+        Log.info("Interior filtering: ENABLED (tracking int/ext)")
     else:
-        Log.info("Interior filtering: DISABLED (all elements)")
+        Log.info("Interior filtering: DISABLED (all elements treated as exterior)")
     
-    # STEP 1: Compute bounds
+    # STEP 1: Compute bounds from ALL panels
     xs, ys = [], []
     for e in panel_elems:
         d = dims(e, view)
@@ -280,14 +290,11 @@ def classify_all_panels(panel_elems, view):
     bounds = (min(xs), max(xs), min(ys), max(ys))
     Log.info("Bounds: xmin=%.2f xmax=%.2f ymin=%.2f ymax=%.2f", *bounds)
     
-    # STEP 2: Filter exterior elements if enabled
+    # STEP 2: Process ALL panels (don't filter them out)
     original_count = len(panel_elems)
-    if FILTER_INTERIOR_ELEMENTS:
-        panel_elems, interior_count = filter_exterior_elements(panel_elems, view, bounds)
-        Log.filtering_summary("Panels", original_count, len(panel_elems), interior_count)
     
     if not panel_elems:
-        raise Exception("No exterior panels found after filtering")
+        raise Exception("No panels found")
     
     # STEP 3: Compute floor split
     floor_split = compute_floor_split(panel_elems, view)
@@ -296,8 +303,7 @@ def classify_all_panels(panel_elems, view):
     # STEP 4: Initialize side summary
     side_summary = init_side_summary()
     
-    # STEP 5: Classify panels with interior detection
-    from core import is_exterior_element
+    # STEP 5: Classify ALL panels with interior detection
     
     if GROUP_PANEL_COMPONENTS:
         # GROUP MODE - collect by side/floor then group
@@ -333,7 +339,7 @@ def classify_all_panels(panel_elems, view):
                 if not element_ids:
                     continue
                 
-                # Allow flexible grouping (not strict 4-element requirement)
+                # Allow flexible grouping
                 group_elements = [elem_lookup[eid] for eid in element_ids if eid in elem_lookup]
                 
                 all_x, all_y, all_z = [], [], []
@@ -351,6 +357,10 @@ def classify_all_panels(panel_elems, view):
                 ymin, ymax = min(all_y), max(all_y)
                 zmin, zmax = min(all_z), max(all_z)
                 
+                # Determine if group is interior
+                center_dims = (0, 0, 0, xmin, xmax, ymin, ymax, zmin, zmax)
+                is_int = not is_exterior_element(center_dims, bounds)
+                
                 panel_groups.append({
                     "id": group_id,
                     "elements": group_elements,
@@ -364,11 +374,13 @@ def classify_all_panels(panel_elems, view):
                     "zmax": zmax,
                     "floor": floor,
                     "side": side,
-                    "component_count": len(element_ids)
+                    "component_count": len(element_ids),
+                    "is_interior": is_int
                 })
                 
-                Log.debug("Panel group %d: Side %s, %s, %d components", 
-                         group_id, side, floor, len(element_ids))
+                Log.debug("Panel group %d: Side %s, %s, %d components (%s)", 
+                         group_id, side, floor, len(element_ids),
+                         "interior" if is_int else "exterior")
                 
                 group_id += 1
         
@@ -428,6 +440,12 @@ def classify_all_panels(panel_elems, view):
                      pid, side, floor, "interior" if is_int else "exterior")
         
         Log.info("Created %d individual panels (no grouping)", len(panel_groups))
+    
+    # Count interior/exterior for summary
+    if FILTER_INTERIOR_ELEMENTS and Log.SHOW_FILTERING:
+        ext_count = sum(1 for pg in panel_groups if not pg.get("is_interior", False))
+        int_count = len(panel_groups) - ext_count
+        Log.filtering_summary("Panels", len(panel_groups), ext_count, int_count)
     
     # Log summary
     for s in SIDES:
@@ -643,14 +661,17 @@ def classify_yolo_side(yolo_detections, bim_export):
     if not yolo_detections:
         return "INTERIOR", 0.0
     
-    sides = list(bim_export.get("sides", {}).keys())
+    # Use EXTERIOR data only for side classification
+    exterior_data = bim_export.get("exterior", {})
+    sides = list(exterior_data.get("sides", {}).keys())
+    
     if not sides:
         return "INTERIOR", 0.0
     
     bim_by_side = {s: {"door": [], "windows": [], "wall_panels": []} 
                    for s in sides}
     
-    for side, side_data in bim_export.get("sides", {}).items():
+    for side, side_data in exterior_data.get("sides", {}).items():
         for elem in side_data.get("elements", []):
             elem_type = elem["type"]
             bim_by_side[side][elem_type].append(elem)
