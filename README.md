@@ -54,7 +54,7 @@ graph LR
 Configure in `config.py`:
 
 ```python
-BASE_DIR = r"C:\Users\ma3589\OneDrive - The University of Waikato\Desktop\Topic 3"
+BASE_DIR = "."
 PYREVIT_DATA = os.path.join(BASE_DIR, "Pyrevit", "Data_saves")
 VALIDATION_DIR = os.path.join(BASE_DIR, "Validation_Output_test", "Step.2")
 ```
