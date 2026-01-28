@@ -7,8 +7,8 @@
 ## 🏗️ Architecture
 
 ```
+script.py               # Main pipeline orchestrator
 detector/
-├── script.py           # Main pipeline orchestrator
 ├── config.py           # Configuration & constants
 ├── core.py             # Geometry utilities
 ├── classification.py   # Element classification
