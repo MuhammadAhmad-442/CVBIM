@@ -27,7 +27,7 @@ graph LR
     F --> G[Match YOLO↔BIM]
     G --> H[Highlight in Revit]
 ```
-
+<img width="1332" height="765" alt="Screenshot 2025-12-09 130829" src="https://github.com/user-attachments/assets/ef0483bd-5f47-4152-94aa-d28769c70b9e" />
 **Steps:**
 1. **Collection** → Gather doors, windows, panels
 2. **Classification** → Assign to sides (A/B/C/D), floors, interior/exterior
@@ -48,7 +48,6 @@ graph LR
 - 🎨 **Visual Feedback** - Color-coded element highlighting
 - 📈 **Enhanced Logging** - Detailed statistics and timing
 ---
-<img width="1332" height="765" alt="Screenshot 2025-12-09 130829" src="https://github.com/user-attachments/assets/ef0483bd-5f47-4152-94aa-d28769c70b9e" />
 
 ## 📁 Paths
 
