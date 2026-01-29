@@ -28,6 +28,8 @@ graph LR
     G --> H[Highlight in Revit]
 ```
 <img width="1332" height="765" alt="Screenshot 2025-12-09 130829" src="https://github.com/user-attachments/assets/ef0483bd-5f47-4152-94aa-d28769c70b9e" />
+
+```
 **Steps:**
 1. **Collection** → Gather doors, windows, panels
 2. **Classification** → Assign to sides (A/B/C/D), floors, interior/exterior
@@ -38,7 +40,6 @@ graph LR
 7. **Matching** → Link detections to elements
 8. **Visualization** → Color-code in Revit
 ---
-
 ## ✨ Features
 
 - 🎯 **Smart Classification** - Automatically assigns elements to facade sides and floors
