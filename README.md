@@ -217,4 +217,4 @@ highlight_doors(door_output, doc, view, filter_ids=None)
 
 ---
 
-**Made for AEC industry** | [Report Issues](https://github.com/yourusername/yolo-bim-matcher/issues)
+**Made for AEC industry** | [Report Issues](letmehelpyou442@gmail.com)
